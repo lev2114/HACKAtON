@@ -237,12 +237,12 @@ func (s *Server) onNpcTalk(client *hub.Client, player *store.Player, msg incomin
 		told = map[string]bool{}
 	}
 
-	fact, hasFact := s.World.NextUntoldFact(npc.ID, told)
-	repeat := hasFact && told[fact.ID]
+	// Use keyword-aware PickFact instead of simple NextUntoldFact
+	fact, isRepeat, availableTopics := s.World.PickFact(npc.ID, msg.Message, told)
 
-	text := s.AI.Reply(context.Background(), npc, fact, msg.Message, repeat)
+	text := s.AI.Reply(context.Background(), npc, fact, msg.Message, isRepeat, availableTopics, player.ID)
 
-	if hasFact && !repeat {
+	if fact != nil && !isRepeat {
 		if err := s.Store.MarkToldFact(player.ID, npc.ID, fact.ID); err != nil {
 			log.Printf("npc_talk: mark told error for %s/%s: %v", player.ID, npc.ID, err)
 		}
