@@ -142,7 +142,7 @@ window.addEventListener("keydown", (e) => {
 // коллизия, и физический проход между комнатами одним и тем же механизмом,
 // без отдельной геометрии дверей/коридоров.
 const WALL_MARGIN = 0.6; // не даём камере влезть прямо в меш стены
-const DOOR_HALF_WIDTH = 2.5; // ширина прохода к соседней комнате
+const DOOR_HALF_WIDTH = 5; // ширина прохода к соседней комнате — широкая, чтобы прощать неидеальную ходьбу мышью
 
 function isInDoorway(room, neighbors, x, z) {
   for (const nb of neighbors) {
