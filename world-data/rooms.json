@@ -6,7 +6,8 @@
     "size": { "w": 10, "h": 5, "d": 10 },
     "color": "#6b7280",
     "npcId": null,
-    "connectsTo": ["room_stars", "room_gravity", "room_rockets", "room_greenhouse", "room_medbay"]
+    "connectsTo": ["room_stars", "room_gravity", "room_rockets", "room_greenhouse", "room_medbay"],
+    "model": "/models/starling-room.glb"
   },
   "room_stars": {
     "id": "room_stars",
