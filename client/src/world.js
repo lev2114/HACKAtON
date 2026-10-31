@@ -8,15 +8,24 @@ export function buildRoom(scene, chunk) {
   const group = new THREE.Group();
   group.name = `room:${room.id}`;
 
+  // room.position — это абсолютные мировые координаты (как и у NPC ниже),
+  // не локальный ноль группы: иначе стены/пол любой комнаты кроме той,
+  // что лежит в (0,0,0), рисуются не там, где на самом деле стоит NPC.
+  const { x: rx, y: ry, z: rz } = room.position;
+
   const shellGeo = new THREE.BoxGeometry(room.size.w, room.size.h, room.size.d);
   const shellMat = new THREE.MeshStandardMaterial({ color: room.color || "#445566", side: THREE.BackSide });
-  group.add(new THREE.Mesh(shellGeo, shellMat));
+  const shell = new THREE.Mesh(shellGeo, shellMat);
+  shell.position.set(rx, ry, rz);
+  group.add(shell);
 
   const floorGeo = new THREE.PlaneGeometry(room.size.w, room.size.d);
   const floorMat = new THREE.MeshStandardMaterial({ color: "#1b1f33" });
   const floor = new THREE.Mesh(floorGeo, floorMat);
   floor.rotation.x = -Math.PI / 2;
-  floor.position.y = -room.size.h / 2;
+  // Чуть выше внутренней грани короба комнаты, иначе две копланарные
+  // поверхности мерцают (z-fighting) при любом малейшем движении камеры.
+  floor.position.set(rx, ry - room.size.h / 2 + 0.03, rz);
   group.add(floor);
 
   const npcMeshes = {};
