@@ -1,0 +1,56 @@
+{
+  "hub": {
+    "id": "hub",
+    "name": "Стыковочный узел",
+    "position": { "x": 0, "y": 0, "z": 0 },
+    "size": { "w": 10, "h": 5, "d": 10 },
+    "color": "#6b7280",
+    "npcId": null,
+    "connectsTo": ["room_stars", "room_gravity", "room_rockets", "room_greenhouse", "room_medbay"]
+  },
+  "room_stars": {
+    "id": "room_stars",
+    "name": "Обсерватория",
+    "position": { "x": 0, "y": 0, "z": -30 },
+    "size": { "w": 12, "h": 6, "d": 12 },
+    "color": "#1e2a5e",
+    "npcId": "losyash",
+    "connectsTo": ["hub"]
+  },
+  "room_gravity": {
+    "id": "room_gravity",
+    "name": "Лаборатория гравитации",
+    "position": { "x": 28, "y": 0, "z": -9 },
+    "size": { "w": 12, "h": 6, "d": 12 },
+    "color": "#3a2e55",
+    "npcId": "krosh",
+    "connectsTo": ["hub"]
+  },
+  "room_rockets": {
+    "id": "room_rockets",
+    "name": "Двигательный отсек",
+    "position": { "x": 18, "y": 0, "z": 24 },
+    "size": { "w": 12, "h": 6, "d": 12 },
+    "color": "#5e2a1e",
+    "npcId": "pin",
+    "connectsTo": ["hub"]
+  },
+  "room_greenhouse": {
+    "id": "room_greenhouse",
+    "name": "Оранжерея",
+    "position": { "x": -18, "y": 0, "z": 24 },
+    "size": { "w": 12, "h": 6, "d": 12 },
+    "color": "#1e5e2a",
+    "npcId": "nyusha",
+    "connectsTo": ["hub"]
+  },
+  "room_medbay": {
+    "id": "room_medbay",
+    "name": "Медблок",
+    "position": { "x": -28, "y": 0, "z": -9 },
+    "size": { "w": 12, "h": 6, "d": 12 },
+    "color": "#5e1e4a",
+    "npcId": "sovunya",
+    "connectsTo": ["hub"]
+  }
+}

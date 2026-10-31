@@ -1,0 +1,50 @@
+<!doctype html>
+<html lang="ru">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Шаролёт</title>
+    <style>
+      html, body { margin: 0; height: 100%; overflow: hidden; background: #05060a; font-family: system-ui, sans-serif; }
+      canvas { display: block; }
+
+      #login {
+        position: fixed; inset: 0; display: flex; align-items: center; justify-content: center;
+        background: #05060a; z-index: 10;
+      }
+      #login form { display: flex; gap: 8px; }
+      #login input { padding: 8px 12px; font-size: 16px; border-radius: 6px; border: 1px solid #444; }
+      #login button { padding: 8px 16px; font-size: 16px; cursor: pointer; border-radius: 6px; border: none; background: #4a7cff; color: white; }
+
+      #hud {
+        position: fixed; top: 12px; left: 12px; color: #cfd8ff; font-size: 14px;
+        z-index: 5; pointer-events: none; text-shadow: 0 1px 2px #000;
+      }
+      #controls {
+        position: fixed; bottom: 10px; right: 12px; color: #8a93b8; font-size: 12px;
+        z-index: 5; pointer-events: none; text-align: right; text-shadow: 0 1px 2px #000;
+      }
+      #chat {
+        position: fixed; bottom: 48px; left: 50%; transform: translateX(-50%);
+        width: min(560px, 90vw); background: rgba(10, 12, 24, 0.88); color: #e8ecff;
+        border-radius: 10px; padding: 10px 14px; font-size: 15px; display: none; z-index: 5;
+      }
+      #chat .name { color: #8fd3ff; font-weight: 600; margin-right: 6px; }
+    </style>
+  </head>
+  <body>
+    <div id="login">
+      <form id="login-form">
+        <input id="login-name" placeholder="Имя космонавта" maxlength="20" required autofocus />
+        <button type="submit">Войти на станцию</button>
+      </form>
+    </div>
+    <div id="hud"></div>
+    <div id="controls">
+      WASD — двигаться · мышь (ЛКМ, затем двигать) — осмотреться<br />
+      E — поговорить с ближайшим Смешариком · 0 — стыковочный узел, 1–5 — отсеки
+    </div>
+    <div id="chat"></div>
+    <script type="module" src="/src/main.js"></script>
+  </body>
+</html>
