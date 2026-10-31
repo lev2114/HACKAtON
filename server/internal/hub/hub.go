@@ -16,7 +16,14 @@ type Client struct {
 	Conn     *websocket.Conn
 	PlayerID string
 	Name     string
-	Room     string
+
+	// room/x/y/z are written by this client's own read-loop goroutine but
+	// READ by every other connection's goroutine via BroadcastToRoom and
+	// PlayersInRoom — unexported on purpose, so the only way to touch them
+	// from outside this file is through Hub's locked methods below. Direct
+	// field access here (within the hub package) still goes through h.mu.
+	room    string
+	x, y, z float64
 
 	// LastPersistedMoveAt is read/written only from this client's own
 	// read-loop goroutine (never concurrently), so it needs no locking —
@@ -31,7 +38,7 @@ func NewClient(conn *websocket.Conn, playerID, name, room string) *Client {
 		Conn:     conn,
 		PlayerID: playerID,
 		Name:     name,
-		Room:     room,
+		room:     room,
 		send:     make(chan []byte, 16),
 	}
 }
@@ -87,12 +94,55 @@ func (h *Hub) Unregister(playerID string) {
 	h.mu.Unlock()
 }
 
-func (h *Hub) SetRoom(playerID, room string) {
+// RoomOf returns the room a player is currently in, or "" if they're not
+// connected (e.g. already disconnected — call this BEFORE Unregister if you
+// need the room they were just in).
+func (h *Hub) RoomOf(playerID string) string {
+	h.mu.RLock()
+	defer h.mu.RUnlock()
+	if c, ok := h.clients[playerID]; ok {
+		return c.room
+	}
+	return ""
+}
+
+// UpdatePosition is the only way room/x/y/z are allowed to change after a
+// client is registered — every write goes through h.mu so BroadcastToRoom
+// and PlayersInRoom (running on other connections' goroutines) never see a
+// torn or stale value.
+func (h *Hub) UpdatePosition(playerID, room string, x, y, z float64) {
 	h.mu.Lock()
 	if c, ok := h.clients[playerID]; ok {
-		c.Room = room
+		c.room, c.x, c.y, c.z = room, x, y, z
 	}
 	h.mu.Unlock()
+}
+
+// PlayerInfo is the live-position shape broadcast for "who's already here"
+// (on room entry) and "who just moved" — see PROTOCOL.md.
+type PlayerInfo struct {
+	PlayerID string  `json:"playerId"`
+	Name     string  `json:"name"`
+	X        float64 `json:"x"`
+	Y        float64 `json:"y"`
+	Z        float64 `json:"z"`
+}
+
+// PlayersInRoom lists everyone currently in roomID except exceptPlayerID —
+// used when a player enters a room, so their client can spawn meshes for
+// players who were already standing there (player_joined only fires for
+// people who arrive AFTER you, so without this you'd never see them).
+func (h *Hub) PlayersInRoom(roomID, exceptPlayerID string) []PlayerInfo {
+	h.mu.RLock()
+	defer h.mu.RUnlock()
+	var out []PlayerInfo
+	for id, c := range h.clients {
+		if id == exceptPlayerID || c.room != roomID {
+			continue
+		}
+		out = append(out, PlayerInfo{PlayerID: id, Name: c.Name, X: c.x, Y: c.y, Z: c.z})
+	}
+	return out
 }
 
 // BroadcastToRoom sends v to every connected client currently in roomID,
@@ -101,7 +151,7 @@ func (h *Hub) BroadcastToRoom(roomID, exceptPlayerID string, v any) {
 	h.mu.RLock()
 	defer h.mu.RUnlock()
 	for id, c := range h.clients {
-		if id == exceptPlayerID || c.Room != roomID {
+		if id == exceptPlayerID || c.room != roomID {
 			continue
 		}
 		c.Send(v)
