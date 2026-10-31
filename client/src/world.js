@@ -60,19 +60,65 @@ export function buildRoom(scene, chunk) {
 
   const npcMeshes = {};
   for (const npc of npcs || []) {
-    const npcGeo = new THREE.SphereGeometry(0.8, 16, 16);
-    const npcMat = new THREE.MeshStandardMaterial({ color: "#ffb3d9" });
-    const mesh = new THREE.Mesh(npcGeo, npcMat);
-    mesh.position.set(npc.position.x, npc.position.y, npc.position.z);
-    mesh.userData.npc = npc;
-    group.add(mesh);
-    npcMeshes[npc.id] = mesh;
+    npcMeshes[npc.id] = buildNpcEntity(scene, group, npc);
   }
 
   addDoorwayLight(group, room, chunk.neighbors);
 
   scene.add(group);
   return { group, npcMeshes, room, neighbors: chunk.neighbors || [] };
+}
+
+// Обёртка-Group на npc.position держит стабильную .position (main.js меряет
+// расстояние до неё для "поговорить по E") независимо от того, успела ли
+// загрузиться 3D-модель — внутри неё либо сразу розовая сфера-заглушка
+// (нет npc.model), либо сфера на время загрузки модели, которая потом
+// подменяется так же, как модель комнаты (см. buildModelRoom).
+function buildNpcEntity(scene, roomGroup, npc) {
+  const holder = new THREE.Group();
+  holder.position.set(npc.position.x, npc.position.y, npc.position.z);
+  holder.userData.npc = npc;
+  roomGroup.add(holder);
+
+  const placeholder = new THREE.Mesh(
+    new THREE.SphereGeometry(0.8, 16, 16),
+    new THREE.MeshStandardMaterial({ color: "#ffb3d9" })
+  );
+  holder.add(placeholder);
+
+  if (npc.model) {
+    loadModel(npc.model)
+      .then((sceneRoot) => {
+        if (holder.parent !== roomGroup || roomGroup.parent !== scene) return; // уже вышли из комнаты
+
+        const instance = sceneRoot.clone(true);
+        instance.userData.sharedModel = true;
+        fitNpcModel(instance, npc);
+
+        holder.remove(placeholder);
+        placeholder.geometry.dispose();
+        placeholder.material.dispose();
+        holder.add(instance);
+      })
+      .catch((err) => console.error(`не удалось загрузить модель NPC ${npc.id}:`, err));
+  }
+
+  return holder;
+}
+
+// Ставит модель персонажа на пол (мировой y=0, как и у всех комнат) и
+// масштабирует под разумный рост — модели приходят в произвольном
+// исходном масштабе, как и модели комнат (см. fitModelToRoom).
+const NPC_TARGET_HEIGHT = 1.7;
+
+function fitNpcModel(root, npc) {
+  const box = new THREE.Box3().setFromObject(root);
+  const size = box.getSize(new THREE.Vector3());
+  const center = box.getCenter(new THREE.Vector3());
+
+  const scale = NPC_TARGET_HEIGHT / (size.y || 1);
+  root.scale.setScalar(scale);
+  root.position.set(-center.x * scale, -npc.position.y - box.min.y * scale, -center.z * scale);
 }
 
 // Ширина проёма — должна совпадать с DOOR_HALF_WIDTH в main.js (там же

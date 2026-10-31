@@ -45,6 +45,10 @@ type NPC struct {
 	Personality string `json:"personality"`
 	Position    Vec3   `json:"position"`
 	FactBank    string `json:"factBank"`
+	// Model is an optional URL to a .glb character model that replaces the
+	// placeholder sphere on the client. Empty = client falls back to the
+	// sphere, same as rooms without a Model (see Room.Model).
+	Model string `json:"model,omitempty"`
 }
 
 type Fact struct {
@@ -95,6 +99,7 @@ type NPCStub struct {
 	Name     string `json:"name"`
 	Title    string `json:"title"`
 	Position Vec3   `json:"position"`
+	Model    string `json:"model,omitempty"`
 }
 
 // RoomStub is the minimal shape of a *neighbouring* room: just enough for
@@ -128,7 +133,7 @@ func (w *World) Chunk(roomID string) (*ChunkData, bool) {
 	var npcs []NPCStub
 	for _, n := range w.NPCs {
 		if n.RoomID == roomID {
-			npcs = append(npcs, NPCStub{ID: n.ID, Name: n.Name, Title: n.Title, Position: n.Position})
+			npcs = append(npcs, NPCStub{ID: n.ID, Name: n.Name, Title: n.Title, Position: n.Position, Model: n.Model})
 		}
 	}
 
