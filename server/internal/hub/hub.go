@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"log"
 	"sync"
+	"time"
 
 	"github.com/gorilla/websocket"
 )
@@ -16,6 +17,11 @@ type Client struct {
 	PlayerID string
 	Name     string
 	Room     string
+
+	// LastPersistedMoveAt is read/written only from this client's own
+	// read-loop goroutine (never concurrently), so it needs no locking —
+	// see the throttling comment in httpapi.onMove.
+	LastPersistedMoveAt time.Time
 
 	send chan []byte
 }
@@ -48,6 +54,7 @@ func (c *Client) Send(v any) {
 func (c *Client) WritePump() {
 	for msg := range c.send {
 		if err := c.Conn.WriteMessage(websocket.TextMessage, msg); err != nil {
+			log.Printf("hub: write error for %s, write pump exiting: %v", c.PlayerID, err)
 			return
 		}
 	}

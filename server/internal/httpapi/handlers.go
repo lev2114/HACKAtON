@@ -10,6 +10,7 @@ import (
 	"encoding/json"
 	"log"
 	"net/http"
+	"time"
 
 	"github.com/gorilla/websocket"
 
@@ -115,6 +116,9 @@ func (s *Server) WS(w http.ResponseWriter, r *http.Request) {
 	defer func() {
 		s.Hub.Unregister(player.ID)
 		client.Close()
+		if err := s.Store.SavePosition(player.ID, client.Room, player.X, player.Y, player.Z); err != nil {
+			log.Printf("disconnect: save error for %s: %v", player.ID, err)
+		}
 		s.Hub.BroadcastToRoom(client.Room, player.ID, map[string]any{
 			"type": "player_left", "playerId": player.ID,
 		})
@@ -172,11 +176,27 @@ func (s *Server) handleMessage(client *hub.Client, player *store.Player, raw []b
 	}
 }
 
+// moveSaveInterval throttles how often a player's position hits SQLite.
+// Movement is broadcast to other players on every single "move" (that must
+// stay snappy), but persisting every move to disk is both unnecessary (we
+// only need a "good enough" position to resume from) and actively harmful:
+// each SQLite write is a blocking disk fsync, and this handler runs in the
+// same goroutine that reads the socket — a write-per-move burst (e.g. a
+// player holding a key for a few seconds, ~20 moves/sec) can't drain the
+// socket fast enough, which backs up until the browser gives up on the
+// connection as unresponsive and closes it out from under us.
+const moveSaveInterval = 1 * time.Second
+
 func (s *Server) onMove(client *hub.Client, player *store.Player, msg incoming) {
 	player.X, player.Y, player.Z = msg.X, msg.Y, msg.Z
-	if err := s.Store.SavePosition(player.ID, client.Room, msg.X, msg.Y, msg.Z); err != nil {
-		log.Printf("move: save error for %s: %v", player.ID, err)
+
+	if now := time.Now(); now.Sub(client.LastPersistedMoveAt) >= moveSaveInterval {
+		client.LastPersistedMoveAt = now
+		if err := s.Store.SavePosition(player.ID, client.Room, msg.X, msg.Y, msg.Z); err != nil {
+			log.Printf("move: save error for %s: %v", player.ID, err)
+		}
 	}
+
 	s.Hub.BroadcastToRoom(client.Room, player.ID, map[string]any{
 		"type": "player_moved", "playerId": player.ID, "x": msg.X, "y": msg.Y, "z": msg.Z,
 	})

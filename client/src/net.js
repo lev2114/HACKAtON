@@ -31,7 +31,8 @@ export class Net {
       let msg;
       try {
         msg = JSON.parse(event.data);
-      } catch {
+      } catch (err) {
+        console.error("net: failed to parse server message:", err);
         return;
       }
       const handler = this.handlers[msg.type];

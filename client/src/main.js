@@ -15,6 +15,9 @@ const renderer = new THREE.WebGLRenderer({ antialias: true });
 renderer.setSize(window.innerWidth, window.innerHeight);
 document.body.appendChild(renderer.domElement);
 
+// Только для отладки (devtools/автотесты) — не используется игровым кодом.
+window.__sharolet = { camera, scene, renderer };
+
 scene.add(new THREE.HemisphereLight(0xffffff, 0x222244, 1.2));
 const sun = new THREE.DirectionalLight(0xffffff, 0.6);
 sun.position.set(5, 10, 5);
