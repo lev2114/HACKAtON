@@ -109,6 +109,8 @@ func (r *Responder) askOllama(ctx context.Context, npc world.NPC, fact *world.Fa
 	return out.Response, nil
 }
 
-func fsmLine(npc world.NPC, fact *world.Fact, prefix string) string {
-	return fmt.Sprintf("%s%s: %s", prefix, npc.Name, fact.Text)
+// fsmLine doesn't repeat npc.Name — the client already prefixes the chat
+// bubble with the speaker's name (see showChat in client/src/main.js).
+func fsmLine(_ world.NPC, fact *world.Fact, prefix string) string {
+	return prefix + fact.Text
 }

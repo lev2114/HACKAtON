@@ -31,10 +31,11 @@
     "id": "room_rockets",
     "name": "Двигательный отсек",
     "position": { "x": 13, "y": 0, "z": 17 },
-    "size": { "w": 12, "h": 6, "d": 12 },
+    "size": { "w": 18, "h": 6, "d": 18 },
     "color": "#5e2a1e",
     "npcId": "pin",
-    "connectsTo": ["hub"]
+    "connectsTo": ["hub"],
+    "model": "/models/starling-mechanical.glb"
   },
   "room_greenhouse": {
     "id": "room_greenhouse",
@@ -49,9 +50,10 @@
     "id": "room_medbay",
     "name": "Медблок",
     "position": { "x": -20, "y": 0, "z": -6 },
-    "size": { "w": 12, "h": 6, "d": 12 },
+    "size": { "w": 18, "h": 6, "d": 18 },
     "color": "#5e1e4a",
     "npcId": "sovunya",
-    "connectsTo": ["hub"]
+    "connectsTo": ["hub"],
+    "model": "/models/starling-medbay.glb"
   }
 }
