@@ -3,11 +3,18 @@
     "id": "hub",
     "name": "Стыковочный узел",
     "position": { "x": 0, "y": 0, "z": 0 },
-    "size": { "w": 18, "h": 6, "d": 18 },
+    "size": { "w": 20, "h": 9, "d": 20 },
     "color": "#6b7280",
     "npcId": null,
-    "connectsTo": ["room_stars", "room_gravity", "room_rockets", "room_greenhouse", "room_medbay"],
-    "model": "/models/starling-room.glb"
+    "connectsTo": ["room_rockets", "room_medbay"],
+    "model": "/models/starling-hub.glb",
+    "modelScale": 1,
+    "radius": 10,
+    "spawn": { "x": 0, "y": 1.6, "z": 0 },
+    "doors": [
+      { "room": "room_medbay", "position": { "x": -9.070031, "y": 0.06, "z": -3.711406 }, "halfWidth": 1, "modelDoor": "MEDICAL" },
+      { "room": "room_rockets", "position": { "x": -5.471776, "y": 0.06, "z": -8.13017 }, "halfWidth": 1, "modelDoor": "MECHANICAL" }
+    ]
   },
   "room_stars": {
     "id": "room_stars",
@@ -30,12 +37,18 @@
   "room_rockets": {
     "id": "room_rockets",
     "name": "Двигательный отсек",
-    "position": { "x": 13, "y": 0, "z": 17 },
-    "size": { "w": 18, "h": 6, "d": 18 },
+    "position": { "x": -20, "y": 0, "z": -28 },
+    "size": { "w": 14.4, "h": 6, "d": 14.4 },
     "color": "#5e2a1e",
     "npcId": "pin",
     "connectsTo": ["hub"],
-    "model": "/models/starling-mechanical.glb"
+    "model": "/models/starling-mechanical.glb",
+    "modelScale": 1,
+    "radius": 7.2,
+    "spawn": { "x": 0, "y": 1.6, "z": -4.8 },
+    "doors": [
+      { "room": "hub", "position": { "x": 0, "y": 0.06, "z": -7.13 }, "halfWidth": 1.1 }
+    ]
   },
   "room_greenhouse": {
     "id": "room_greenhouse",
@@ -49,11 +62,17 @@
   "room_medbay": {
     "id": "room_medbay",
     "name": "Медблок",
-    "position": { "x": -20, "y": 0, "z": -6 },
-    "size": { "w": 18, "h": 6, "d": 18 },
+    "position": { "x": -30, "y": 0, "z": -10 },
+    "size": { "w": 14.4, "h": 6, "d": 14.4 },
     "color": "#5e1e4a",
-    "npcId": "sovunya",
+    "npcId": "karich",
     "connectsTo": ["hub"],
-    "model": "/models/starling-medbay.glb"
+    "model": "/models/starling-medbay.glb",
+    "modelScale": 1,
+    "radius": 7.2,
+    "spawn": { "x": 0, "y": 1.6, "z": -4.8 },
+    "doors": [
+      { "room": "hub", "position": { "x": 0, "y": 0.06, "z": -7.13 }, "halfWidth": 1.1 }
+    ]
   }
 }
