@@ -1,0 +1,21 @@
+# --- client (node/vite) ---
+client/node_modules/
+client/dist/
+client/.vite/
+
+# --- server (go) ---
+server/*.exe
+server/server
+server/station.db
+server/server.log
+
+# --- локальные артефакты ---
+*.db
+*.log
+.env
+.DS_Store
+Thumbs.db
+
+# --- IDE ---
+.vscode/
+.idea/
