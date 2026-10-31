@@ -47,6 +47,13 @@ func Open(path string) (*Store, error) {
 	if err != nil {
 		return nil, err
 	}
+	// SQLite allows exactly one writer at a time; database/sql's default
+	// connection pool happily opens several connections and lets two of
+	// them race, which SQLite answers with SQLITE_BUSY ("database is
+	// locked") instead of queuing. A single connection serializes every
+	// query through it, which is more than fast enough at our scale and
+	// removes the race entirely.
+	db.SetMaxOpenConns(1)
 	if _, err := db.Exec(schema); err != nil {
 		return nil, fmt.Errorf("migrate: %w", err)
 	}
