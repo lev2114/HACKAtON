@@ -75,6 +75,11 @@ function enterChunk(chunk) {
   destroyRoom(scene, currentRoomBuilt);
   for (const id of [...players.keys()]) removePlayerMesh(id);
   currentRoomBuilt = buildRoom(scene, chunk);
+  // Комнаты стоят в разных местах мира (пентагон вокруг стыковочного узла,
+  // см. world-data/rooms.json) — камеру нужно переносить к центру новой
+  // комнаты при каждом входе, а не только при первом подключении.
+  const { x, z } = chunk.room.position;
+  camera.position.set(x, 1.6, z + 3);
   hud.textContent = `${myName} · ${chunk.room.name}`;
   chatBox.style.display = "none";
 }
@@ -82,7 +87,6 @@ function enterChunk(chunk) {
 net.on("welcome", (msg) => {
   myId = msg.playerId;
   myName = msg.name;
-  camera.position.set(msg.position.x, 1.6, msg.position.z);
   enterChunk(msg.chunk);
 });
 
@@ -154,7 +158,7 @@ function tick() {
   camera.rotation.x = pitch;
 
   const forward = new THREE.Vector3(-Math.sin(yaw), 0, -Math.cos(yaw));
-  const right = new THREE.Vector3(forward.z, 0, -forward.x);
+  const right = new THREE.Vector3(-forward.z, 0, forward.x);
   const move = new THREE.Vector3();
   if (keys["KeyW"]) move.add(forward);
   if (keys["KeyS"]) move.sub(forward);
