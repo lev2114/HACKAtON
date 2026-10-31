@@ -70,7 +70,7 @@ export function buildRoom(scene, chunk) {
   }
 
   scene.add(group);
-  return { group, npcMeshes, room };
+  return { group, npcMeshes, room, neighbors: chunk.neighbors || [] };
 }
 
 function buildProceduralRoom(group, room, rx, ry, rz) {
