@@ -97,12 +97,26 @@ type NPCStub struct {
 	Position Vec3   `json:"position"`
 }
 
+// RoomStub is the minimal shape of a *neighbouring* room: just enough for
+// the client to know where a connected room sits and how big it is, so it
+// can open a doorway-shaped gap in the collision and auto-load that room
+// when the player walks into it. No NPCs, no facts — a neighbour is a
+// signpost, not room content.
+type RoomStub struct {
+	ID       string `json:"id"`
+	Name     string `json:"name"`
+	Position Vec3   `json:"position"`
+	Size     Size3  `json:"size"`
+}
+
 // ChunkData is exactly what gets sent to a client for one room. This is the
 // unit of client-side caching: a client holds at most its current room (+
-// maybe one neighbour), never the rest of the station and never any Facts.
+// its immediate neighbours' footprints), never the rest of the station and
+// never any Facts.
 type ChunkData struct {
-	Room Room      `json:"room"`
-	NPCs []NPCStub `json:"npcs"`
+	Room      Room       `json:"room"`
+	NPCs      []NPCStub  `json:"npcs"`
+	Neighbors []RoomStub `json:"neighbors"`
 }
 
 func (w *World) Chunk(roomID string) (*ChunkData, bool) {
@@ -118,7 +132,16 @@ func (w *World) Chunk(roomID string) (*ChunkData, bool) {
 		}
 	}
 
-	return &ChunkData{Room: room, NPCs: npcs}, true
+	var neighbors []RoomStub
+	for _, id := range room.ConnectsTo {
+		nb, ok := w.Rooms[id]
+		if !ok {
+			continue
+		}
+		neighbors = append(neighbors, RoomStub{ID: nb.ID, Name: nb.Name, Position: nb.Position, Size: nb.Size})
+	}
+
+	return &ChunkData{Room: room, NPCs: npcs, Neighbors: neighbors}, true
 }
 
 // NextUntoldFact picks the next fact an NPC hasn't told this player yet.

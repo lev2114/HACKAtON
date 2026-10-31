@@ -2,19 +2,6 @@ import * as THREE from "three";
 import { Net } from "./net.js";
 import { buildRoom, destroyRoom } from "./world.js";
 
-// Временная заглушка вместо реальных дверей/коллизий между отсеками:
-// пока игрок физически не "ходит" между комнатами, переход запрашивается
-// по номеру клавиши. Заменить на триггер-зоны при проходе через проём —
-// см. TASKS.md.
-const ROOM_KEYS = {
-  Digit0: "hub",
-  Digit1: "room_stars",
-  Digit2: "room_gravity",
-  Digit3: "room_rockets",
-  Digit4: "room_greenhouse",
-  Digit5: "room_medbay",
-};
-
 const net = new Net();
 
 const scene = new THREE.Scene();
@@ -71,15 +58,15 @@ function removePlayerMesh(id) {
   players.delete(id);
 }
 
-function enterChunk(chunk) {
+// Игрок физически доходит до новой комнаты сам (см. collision ниже) —
+// телепортируем камеру только при первом подключении (teleport = позиция
+// игрока из БД), а не при каждой смене чанка, иначе перебьём то место,
+// докуда он реально дошёл.
+function enterChunk(chunk, teleport) {
   destroyRoom(scene, currentRoomBuilt);
   for (const id of [...players.keys()]) removePlayerMesh(id);
   currentRoomBuilt = buildRoom(scene, chunk);
-  // Комнаты стоят в разных местах мира (пентагон вокруг стыковочного узла,
-  // см. world-data/rooms.json) — камеру нужно переносить к центру новой
-  // комнаты при каждом входе, а не только при первом подключении.
-  const { x, z } = chunk.room.position;
-  camera.position.set(x, 1.6, z + 3);
+  if (teleport) camera.position.set(teleport.x, 1.6, teleport.z);
   hud.textContent = `${myName} · ${chunk.room.name}`;
   chatBox.style.display = "none";
 }
@@ -87,10 +74,13 @@ function enterChunk(chunk) {
 net.on("welcome", (msg) => {
   myId = msg.playerId;
   myName = msg.name;
-  enterChunk(msg.chunk);
+  enterChunk(msg.chunk, msg.position);
 });
 
-net.on("chunk_data", (msg) => enterChunk(msg.chunk));
+net.on("chunk_data", (msg) => {
+  pendingRoomId = null;
+  enterChunk(msg.chunk);
+});
 
 net.on("player_joined", (msg) => {
   if (msg.playerId === myId) return;
@@ -139,14 +129,69 @@ function findNearestNpc() {
 }
 
 window.addEventListener("keydown", (e) => {
-  if (e.code === "KeyE") {
-    const near = findNearestNpc();
-    if (near) net.send("npc_talk", { npcId: near.id, message: "Расскажи что-нибудь интересное" });
-    return;
-  }
-  const room = ROOM_KEYS[e.code];
-  if (room) net.send("chunk_request", { room });
+  if (e.code !== "KeyE") return;
+  const near = findNearestNpc();
+  if (near) net.send("npc_talk", { npcId: near.id, message: "Расскажи что-нибудь интересное" });
 });
+
+// Стены комнаты блокируют камеру, КРОМЕ узкого "проёма" в направлении
+// каждого соседнего отсека (room.connectsTo с сервера) — так получается и
+// коллизия, и физический проход между комнатами одним и тем же механизмом,
+// без отдельной геометрии дверей/коридоров.
+const WALL_MARGIN = 0.6; // не даём камере влезть прямо в меш стены
+const DOOR_HALF_WIDTH = 2.5; // ширина прохода к соседней комнате
+
+function isInDoorway(room, neighbors, x, z) {
+  for (const nb of neighbors) {
+    const dx = nb.position.x - room.position.x;
+    const dz = nb.position.z - room.position.z;
+    const len = Math.hypot(dx, dz) || 1;
+    const dirX = dx / len;
+    const dirZ = dz / len;
+    const perpX = -dirZ;
+    const perpZ = dirX;
+
+    const relX = x - room.position.x;
+    const relZ = z - room.position.z;
+    const along = relX * dirX + relZ * dirZ; // насколько мы в стороне соседа
+    const lateral = relX * perpX + relZ * perpZ; // насколько в стороне от прямой к нему
+
+    if (along > 0 && Math.abs(lateral) < DOOR_HALF_WIDTH) return true;
+  }
+  return false;
+}
+
+// Возвращает (x, z), в которые реально можно встать: как есть, если игрок
+// внутри комнаты или в проёме к соседу, иначе — прижатые к ближайшей стене.
+function resolveCollision(room, neighbors, x, z) {
+  const halfW = room.size.w / 2 - WALL_MARGIN;
+  const halfD = room.size.d / 2 - WALL_MARGIN;
+  const relX = x - room.position.x;
+  const relZ = z - room.position.z;
+
+  if (Math.abs(relX) <= halfW && Math.abs(relZ) <= halfD) return { x, z };
+  if (isInDoorway(room, neighbors, x, z)) return { x, z };
+
+  return {
+    x: room.position.x + THREE.MathUtils.clamp(relX, -halfW, halfW),
+    z: room.position.z + THREE.MathUtils.clamp(relZ, -halfD, halfD),
+  };
+}
+
+let pendingRoomId = null;
+
+function maybeAutoEnterNeighbor() {
+  if (!currentRoomBuilt || pendingRoomId) return;
+  for (const nb of currentRoomBuilt.neighbors) {
+    const dx = Math.abs(camera.position.x - nb.position.x);
+    const dz = Math.abs(camera.position.z - nb.position.z);
+    if (dx < nb.size.w / 2 && dz < nb.size.d / 2) {
+      pendingRoomId = nb.id;
+      net.send("chunk_request", { room: nb.id });
+      return;
+    }
+  }
+}
 
 const speed = 4; // единиц/сек
 const clock = new THREE.Clock();
@@ -167,6 +212,13 @@ function tick() {
   if (move.lengthSq() > 0) {
     move.normalize().multiplyScalar(speed * dt);
     camera.position.add(move);
+  }
+
+  if (currentRoomBuilt) {
+    const resolved = resolveCollision(currentRoomBuilt.room, currentRoomBuilt.neighbors, camera.position.x, camera.position.z);
+    camera.position.x = resolved.x;
+    camera.position.z = resolved.z;
+    maybeAutoEnterNeighbor();
   }
 
   const now = performance.now();

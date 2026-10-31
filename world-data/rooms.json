@@ -3,7 +3,7 @@
     "id": "hub",
     "name": "Стыковочный узел",
     "position": { "x": 0, "y": 0, "z": 0 },
-    "size": { "w": 10, "h": 5, "d": 10 },
+    "size": { "w": 18, "h": 6, "d": 18 },
     "color": "#6b7280",
     "npcId": null,
     "connectsTo": ["room_stars", "room_gravity", "room_rockets", "room_greenhouse", "room_medbay"],
