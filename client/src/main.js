@@ -82,7 +82,9 @@ net.on("welcome", (msg) => {
 
 net.on("chunk_data", (msg) => {
   pendingRoomId = null;
-  enterChunk(msg.chunk);
+  const entry = computeEntryPoint(msg.chunk.room, fromRoomForTransition);
+  fromRoomForTransition = null;
+  enterChunk(msg.chunk, entry);
 });
 
 net.on("player_joined", (msg) => {
@@ -138,11 +140,34 @@ window.addEventListener("keydown", (e) => {
 });
 
 // Стены комнаты блокируют камеру, КРОМЕ узкого "проёма" в направлении
-// каждого соседнего отсека (room.connectsTo с сервера) — так получается и
-// коллизия, и физический проход между комнатами одним и тем же механизмом,
-// без отдельной геометрии дверей/коридоров.
+// каждого соседнего отсека (room.connectsTo с сервера). Процедурные комнаты
+// (все, кроме хаба) теперь рисуются круглыми с реальной вырезанной аркой
+// в стене — см. buildProceduralRoom в world.js, использует те же формулы
+// радиуса/ширины прохода, значения должны совпадать с этим файлом.
 const WALL_MARGIN = 0.6; // не даём камере влезть прямо в меш стены
-const DOOR_HALF_WIDTH = 5; // ширина прохода к соседней комнате — широкая, чтобы прощать неидеальную ходьбу мышью
+const DOOR_HALF_WIDTH = 3; // ширина прохода к соседней комнате
+
+function roomRadius(room) {
+  return Math.min(room.size.w, room.size.d) / 2;
+}
+
+// Хаб — на модели тиммейта (прямоугольный бокс-коллайдер приближённо под
+// её габариты), остальные комнаты — круглые без модели.
+function isBoxRoom(room) {
+  return Boolean(room.model);
+}
+
+function isInsideRoom(room, x, z) {
+  const relX = x - room.position.x;
+  const relZ = z - room.position.z;
+  if (isBoxRoom(room)) {
+    const halfW = room.size.w / 2 - WALL_MARGIN;
+    const halfD = room.size.d / 2 - WALL_MARGIN;
+    return Math.abs(relX) <= halfW && Math.abs(relZ) <= halfD;
+  }
+  const r = roomRadius(room) - WALL_MARGIN;
+  return relX * relX + relZ * relZ <= r * r;
+}
 
 function isInDoorway(room, neighbors, x, z) {
   for (const nb of neighbors) {
@@ -167,33 +192,70 @@ function isInDoorway(room, neighbors, x, z) {
 // Возвращает (x, z), в которые реально можно встать: как есть, если игрок
 // внутри комнаты или в проёме к соседу, иначе — прижатые к ближайшей стене.
 function resolveCollision(room, neighbors, x, z) {
-  const halfW = room.size.w / 2 - WALL_MARGIN;
-  const halfD = room.size.d / 2 - WALL_MARGIN;
+  if (isInsideRoom(room, x, z)) return { x, z };
+  if (isInDoorway(room, neighbors, x, z)) return { x, z };
+
   const relX = x - room.position.x;
   const relZ = z - room.position.z;
 
-  if (Math.abs(relX) <= halfW && Math.abs(relZ) <= halfD) return { x, z };
-  if (isInDoorway(room, neighbors, x, z)) return { x, z };
+  if (isBoxRoom(room)) {
+    const halfW = room.size.w / 2 - WALL_MARGIN;
+    const halfD = room.size.d / 2 - WALL_MARGIN;
+    return {
+      x: room.position.x + THREE.MathUtils.clamp(relX, -halfW, halfW),
+      z: room.position.z + THREE.MathUtils.clamp(relZ, -halfD, halfD),
+    };
+  }
 
-  return {
-    x: room.position.x + THREE.MathUtils.clamp(relX, -halfW, halfW),
-    z: room.position.z + THREE.MathUtils.clamp(relZ, -halfD, halfD),
-  };
+  const dist = Math.hypot(relX, relZ) || 1;
+  const r = roomRadius(room) - WALL_MARGIN;
+  return { x: room.position.x + (relX / dist) * r, z: room.position.z + (relZ / dist) * r };
+}
+
+// Где встанет игрок, когда появляется в newRoom, придя из fromRoom — чуть
+// внутри стены со стороны, откуда он шёл, лицом вглубь новой комнаты.
+// Без этого игрок возникал бы в центре комнаты, что при повторном входе
+// телепортирует его мимо места, где он реально стоял.
+function computeEntryPoint(newRoom, fromRoom) {
+  if (!fromRoom) return null;
+  const dx = fromRoom.position.x - newRoom.position.x;
+  const dz = fromRoom.position.z - newRoom.position.z;
+  const len = Math.hypot(dx, dz) || 1;
+  const dirX = dx / len;
+  const dirZ = dz / len;
+  const inset = WALL_MARGIN + 0.8;
+
+  let t;
+  if (isBoxRoom(newRoom)) {
+    const halfW = newRoom.size.w / 2 - inset;
+    const halfD = newRoom.size.d / 2 - inset;
+    const tX = dirX !== 0 ? Math.abs(halfW / dirX) : Infinity;
+    const tZ = dirZ !== 0 ? Math.abs(halfD / dirZ) : Infinity;
+    t = Math.min(tX, tZ);
+  } else {
+    t = roomRadius(newRoom) - inset;
+  }
+
+  return { x: newRoom.position.x + dirX * t, z: newRoom.position.z + dirZ * t };
 }
 
 let pendingRoomId = null;
+let fromRoomForTransition = null;
 
+// Переход срабатывает в момент пересечения проёма (а не когда игрок дойдёт
+// до центра соседней комнаты) — раньше между "прошёл через проём" и
+// "комната реально сменилась" была добрая пара секунд ходьбы в пустоте.
 function maybeAutoEnterNeighbor() {
   if (!currentRoomBuilt || pendingRoomId) return;
-  for (const nb of currentRoomBuilt.neighbors) {
-    const dx = Math.abs(camera.position.x - nb.position.x);
-    const dz = Math.abs(camera.position.z - nb.position.z);
-    if (dx < nb.size.w / 2 && dz < nb.size.d / 2) {
-      pendingRoomId = nb.id;
-      net.send("chunk_request", { room: nb.id });
-      return;
-    }
-  }
+  const { room, neighbors } = currentRoomBuilt;
+  if (isInsideRoom(room, camera.position.x, camera.position.z)) return;
+
+  const nb = neighbors.find((n) => isInDoorway(room, [n], camera.position.x, camera.position.z));
+  if (!nb) return;
+
+  pendingRoomId = nb.id;
+  fromRoomForTransition = room;
+  net.send("chunk_request", { room: nb.id });
 }
 
 const speed = 4; // единиц/сек
