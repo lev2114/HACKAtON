@@ -1,7 +1,7 @@
 // Package world loads the static station data (rooms, NPCs, facts) from
 // JSON files and answers the two questions the rest of the server needs:
 // "what does this room look like" (Chunk) and "what should this NPC say
-// next to this specific player" (NextUntoldFact).
+// next to this specific player" (PickFact / NextUntoldFact).
 package world
 
 import (
@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 )
 
 type Vec3 struct {
@@ -60,7 +61,7 @@ type Fact struct {
 
 // World holds the full station dataset. In the "no more than 10% cached on
 // client" rule, THIS is the 100%: clients only ever see one Room (via Chunk)
-// at a time and individual Facts one at a time (via NextUntoldFact), never
+// at a time and individual Facts one at a time (via PickFact), never
 // the full Facts map.
 type World struct {
 	Rooms map[string]Room
@@ -149,9 +150,116 @@ func (w *World) Chunk(roomID string) (*ChunkData, bool) {
 	return &ChunkData{Room: room, NPCs: npcs, Neighbors: neighbors}, true
 }
 
+// ---------------------------------------------------------------------------
+// Keyword-based topic matching (FSM brain)
+// ---------------------------------------------------------------------------
+
+// TopicKeywords maps Russian keywords the player might type to fact topic IDs.
+// Simple substring matching — no ML, works offline, fast.
+var TopicKeywords = map[string][]string{
+	"stars":      {"звезд", "солнц", "полярн", "светил", "светит"},
+	"blackholes": {"чёрн", "черн", "дыр", "горизонт событ", "сингуляр"},
+	"galaxies":   {"галакти", "млечн", "путь", "андромед"},
+	"cosmology":  {"вселен", "расшир", "хаббл", "большой взрыв", "big bang"},
+	"gravity":    {"гравит", "невесом", "притяжен", "падени", "падает", "вес"},
+	"newton":     {"ньютон", "закон", "сила", "инерц"},
+	"inertia":    {"инерц", "движен", "остановит", "летит"},
+	"spin":       {"вращен", "крутит", "момент импульс", "закрутит"},
+	"rockets":    {"ракет", "двигател", "реактив", "топлив", "запуск"},
+	"history":    {"истори", "гагарин", "спутник", "первый", "1957", "1961", "космонавт"},
+	"staging":    {"ступен", "многоступ", "сброс", "баки"},
+	"reuse":      {"повторн", "многоразов", "посадк", "возврат"},
+	"body":       {"тело", "лицо", "отёк", "отек", "кост", "мышц"},
+	"plants":     {"растен", "оранжере", "салат", "выращив"},
+	"food":       {"еда", "еду", "пищ", "тюбик", "крошк", "паковал"},
+	"growth":     {"рост", "подраст", "позвоноч", "сантиметр"},
+	"adaptation": {"адаптац", "привык", "первые дни", "укачив", "болезн"},
+	"radiation":  {"радиац", "облучен", "излучен"},
+	"sleep":      {"сон", "спать", "сутки", "расписан", "восход", "закат"},
+	"return":     {"возвращ", "реабилитац", "после полёт", "после полет", "земл"},
+	"psychology": {"психолог", "изоляц", "совместим", "характер", "экипаж"},
+}
+
+// matchTopics extracts topic IDs from a player's message by simple keyword
+// substring matching. Returns matched topics in order found.
+func matchTopics(message string) []string {
+	lower := strings.ToLower(message)
+	var matched []string
+	seen := map[string]bool{}
+	for topic, keywords := range TopicKeywords {
+		for _, kw := range keywords {
+			if strings.Contains(lower, kw) && !seen[topic] {
+				matched = append(matched, topic)
+				seen[topic] = true
+				break
+			}
+		}
+	}
+	return matched
+}
+
+// PickFact selects the best fact for an NPC to tell this player, considering:
+//  1. If the player's message matches a topic keyword → pick an untold fact
+//     from that topic first.
+//  2. If the matched topic's facts are all told → repeat the most relevant one.
+//  3. If no topic matched → pick the next untold fact in order.
+//  4. If everything's been told → repeat the last fact.
+//
+// Returns the chosen fact, whether it's a repeat, and a list of topics that
+// still have untold facts (so the NPC can suggest what to ask about).
+func (w *World) PickFact(npcID string, message string, told map[string]bool) (fact *Fact, isRepeat bool, availableTopics []string) {
+	bank := w.Facts[npcID]
+	if len(bank) == 0 {
+		return nil, false, nil
+	}
+
+	// Collect topics that still have untold facts for this NPC
+	topicSet := map[string]bool{}
+	for _, f := range bank {
+		if !told[f.ID] {
+			topicSet[f.Topic] = true
+		}
+	}
+	for t := range topicSet {
+		availableTopics = append(availableTopics, t)
+	}
+
+	// Try to match player's question to a topic
+	matchedTopics := matchTopics(message)
+
+	// 1. Topic-matched untold fact
+	for _, topic := range matchedTopics {
+		for i := range bank {
+			if bank[i].Topic == topic && !told[bank[i].ID] {
+				return &bank[i], false, availableTopics
+			}
+		}
+	}
+
+	// 2. Topic-matched but already told (repeat, but relevant to the question)
+	for _, topic := range matchedTopics {
+		for i := range bank {
+			if bank[i].Topic == topic {
+				return &bank[i], true, availableTopics
+			}
+		}
+	}
+
+	// 3. No topic match — next untold fact in order
+	for i := range bank {
+		if !told[bank[i].ID] {
+			return &bank[i], false, availableTopics
+		}
+	}
+
+	// 4. Everything told — repeat last
+	return &bank[len(bank)-1], true, availableTopics
+}
+
 // NextUntoldFact picks the next fact an NPC hasn't told this player yet.
 // If every fact has already been told, it returns the last one again so the
 // NPC has something to say, and the caller can flag it as a repeat.
+// DEPRECATED: use PickFact for keyword-aware selection.
 func (w *World) NextUntoldFact(npcID string, told map[string]bool) (*Fact, bool) {
 	bank := w.Facts[npcID]
 	if len(bank) == 0 {
