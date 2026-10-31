@@ -55,7 +55,7 @@ export function buildRoom(scene, chunk) {
   if (room.model) {
     buildModelRoom(scene, group, room);
   } else {
-    buildProceduralRoom(group, room, rx, ry, rz);
+    buildProceduralRoom(group, room, rx, ry, rz, chunk.neighbors);
   }
 
   const npcMeshes = {};
@@ -69,18 +69,21 @@ export function buildRoom(scene, chunk) {
     npcMeshes[npc.id] = mesh;
   }
 
-  buildDoorwayMarkers(group, room, chunk.neighbors);
+  addDoorwayLight(group, room, chunk.neighbors);
 
   scene.add(group);
   return { group, npcMeshes, room, neighbors: chunk.neighbors || [] };
 }
 
-// Проход между комнатами логический (нет геометрии коридора), поэтому без
-// подсказки игрок просто идёт в черноту и не понимает, туда ли он идёт.
-// Ставим светящийся маяк ровно в точке, где невидимый проём пересекает
-// стену (см. isInDoorway/resolveCollision в main.js — направление и
-// ширина прохода должны совпадать с этой же математикой).
-function buildDoorwayMarkers(group, room, neighbors) {
+// Ширина проёма — должна совпадать с DOOR_HALF_WIDTH в main.js (там же
+// коллизия/триггер перехода), иначе видимая дыра в стене и реально
+// проходимая зона разъедутся.
+const DOOR_HALF_WIDTH = 3;
+
+// Освещает сам проём и кусок черноты за ним, чтобы было видно, куда идти.
+// Для процедурных (круглых) комнат геометрия уже сама показывает дыру в
+// стене — свет тут просто подсветка, не замена видимости прохода.
+function addDoorwayLight(group, room, neighbors) {
   for (const nb of neighbors || []) {
     const dx = nb.position.x - room.position.x;
     const dz = nb.position.z - room.position.z;
@@ -88,47 +91,65 @@ function buildDoorwayMarkers(group, room, neighbors) {
     const dirX = dx / len;
     const dirZ = dz / len;
 
-    const halfW = room.size.w / 2;
-    const halfD = room.size.d / 2;
-    const tX = dirX !== 0 ? Math.abs(halfW / dirX) : Infinity;
-    const tZ = dirZ !== 0 ? Math.abs(halfD / dirZ) : Infinity;
-    const t = Math.min(tX, tZ);
+    let t;
+    if (room.model) {
+      const halfW = room.size.w / 2;
+      const halfD = room.size.d / 2;
+      const tX = dirX !== 0 ? Math.abs(halfW / dirX) : Infinity;
+      const tZ = dirZ !== 0 ? Math.abs(halfD / dirZ) : Infinity;
+      t = Math.min(tX, tZ);
+    } else {
+      t = Math.min(room.size.w, room.size.d) / 2;
+    }
 
-    const markerX = room.position.x + dirX * t;
-    const markerZ = room.position.z + dirZ * t;
     const floorY = room.position.y - room.size.h / 2;
-    const markerHeight = room.size.h * 0.8;
-
-    const marker = new THREE.Mesh(
-      new THREE.CylinderGeometry(0.2, 0.2, markerHeight, 10),
-      new THREE.MeshStandardMaterial({ color: "#8be9ff", emissive: "#4fd8ff", emissiveIntensity: 1.5 })
-    );
-    marker.position.set(markerX, floorY + markerHeight / 2, markerZ);
-    group.add(marker);
-
-    // Освещает и сам проём, и кусок черноты за ним — чтобы было видно,
-    // куда идти, ещё до того, как дойдёшь до маяка.
     const beacon = new THREE.PointLight(0x4fd8ff, 3, 18);
-    beacon.position.set(markerX, floorY + 1.6, markerZ);
+    beacon.position.set(room.position.x + dirX * t, floorY + 1.6, room.position.z + dirZ * t);
     group.add(beacon);
   }
 }
 
-function buildProceduralRoom(group, room, rx, ry, rz) {
-  const shellGeo = new THREE.BoxGeometry(room.size.w, room.size.h, room.size.d);
-  const shellMat = new THREE.MeshStandardMaterial({ color: room.color || "#445566", side: THREE.BackSide });
-  const shell = new THREE.Mesh(shellGeo, shellMat);
-  shell.position.set(rx, ry, rz);
-  group.add(shell);
+// Круглая комната с настоящей вырезанной аркой в стене (не просто
+// "проходимая" зона без видимой дыры) — у всех процедурных комнат ровно
+// один сосед (хаб), так что арка всегда одна.
+function buildProceduralRoom(group, room, rx, ry, rz, neighbors) {
+  const radius = Math.min(room.size.w, room.size.d) / 2;
+  const nb = neighbors && neighbors[0];
 
-  const floorGeo = new THREE.PlaneGeometry(room.size.w, room.size.d);
+  let thetaStart = 0;
+  let thetaLength = Math.PI * 2;
+  if (nb) {
+    const dx = nb.position.x - rx;
+    const dz = nb.position.z - rz;
+    // THREE.CylinderGeometry кладёт вершины как x = r·sin(θ), z = r·cos(θ)
+    // (не наоборот) — поэтому atan2(dx, dz), а не atan2(dz, dx).
+    const bearing = Math.atan2(dx, dz);
+    const halfAngle = Math.atan2(DOOR_HALF_WIDTH, radius);
+    // Стена — это дуга ОТ конца проёма до его начала (обходя полный круг
+    // в обратную сторону), т.е. "всё, кроме проёма".
+    thetaStart = bearing + halfAngle;
+    thetaLength = Math.PI * 2 - 2 * halfAngle;
+  }
+
+  const wallGeo = new THREE.CylinderGeometry(radius, radius, room.size.h, 48, 1, true, thetaStart, thetaLength);
+  const wallMat = new THREE.MeshStandardMaterial({ color: room.color || "#445566", side: THREE.BackSide });
+  const wall = new THREE.Mesh(wallGeo, wallMat);
+  wall.position.set(rx, ry, rz);
+  group.add(wall);
+
+  const floorGeo = new THREE.CircleGeometry(radius, 48);
   const floorMat = new THREE.MeshStandardMaterial({ color: "#1b1f33" });
   const floor = new THREE.Mesh(floorGeo, floorMat);
   floor.rotation.x = -Math.PI / 2;
-  // Чуть выше внутренней грани короба комнаты, иначе две копланарные
-  // поверхности мерцают (z-fighting) при любом малейшем движении камеры.
   floor.position.set(rx, ry - room.size.h / 2 + 0.03, rz);
   group.add(floor);
+
+  const ceilingGeo = new THREE.CircleGeometry(radius, 48);
+  const ceilingMat = new THREE.MeshStandardMaterial({ color: room.color || "#445566", side: THREE.DoubleSide });
+  const ceiling = new THREE.Mesh(ceilingGeo, ceilingMat);
+  ceiling.rotation.x = Math.PI / 2;
+  ceiling.position.set(rx, ry + room.size.h / 2 - 0.03, rz);
+  group.add(ceiling);
 }
 
 function buildModelRoom(scene, group, room) {
