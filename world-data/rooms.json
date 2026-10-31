@@ -12,7 +12,7 @@
   "room_stars": {
     "id": "room_stars",
     "name": "Обсерватория",
-    "position": { "x": 0, "y": 0, "z": -30 },
+    "position": { "x": 0, "y": 0, "z": -21 },
     "size": { "w": 12, "h": 6, "d": 12 },
     "color": "#1e2a5e",
     "npcId": "losyash",
@@ -21,7 +21,7 @@
   "room_gravity": {
     "id": "room_gravity",
     "name": "Лаборатория гравитации",
-    "position": { "x": 28, "y": 0, "z": -9 },
+    "position": { "x": 20, "y": 0, "z": -6 },
     "size": { "w": 12, "h": 6, "d": 12 },
     "color": "#3a2e55",
     "npcId": "krosh",
@@ -30,7 +30,7 @@
   "room_rockets": {
     "id": "room_rockets",
     "name": "Двигательный отсек",
-    "position": { "x": 18, "y": 0, "z": 24 },
+    "position": { "x": 13, "y": 0, "z": 17 },
     "size": { "w": 12, "h": 6, "d": 12 },
     "color": "#5e2a1e",
     "npcId": "pin",
@@ -39,7 +39,7 @@
   "room_greenhouse": {
     "id": "room_greenhouse",
     "name": "Оранжерея",
-    "position": { "x": -18, "y": 0, "z": 24 },
+    "position": { "x": -13, "y": 0, "z": 17 },
     "size": { "w": 12, "h": 6, "d": 12 },
     "color": "#1e5e2a",
     "npcId": "nyusha",
@@ -48,7 +48,7 @@
   "room_medbay": {
     "id": "room_medbay",
     "name": "Медблок",
-    "position": { "x": -28, "y": 0, "z": -9 },
+    "position": { "x": -20, "y": 0, "z": -6 },
     "size": { "w": 12, "h": 6, "d": 12 },
     "color": "#5e1e4a",
     "npcId": "sovunya",
