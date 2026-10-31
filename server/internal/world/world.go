@@ -31,6 +31,10 @@ type Room struct {
 	Color      string   `json:"color"`
 	NpcID      *string  `json:"npcId"`
 	ConnectsTo []string `json:"connectsTo"`
+	// Model is an optional URL (served by the client's static files) to a
+	// .glb scene that replaces the procedural box geometry for this room.
+	// Empty string = client falls back to the procedural box+floor.
+	Model string `json:"model,omitempty"`
 }
 
 type NPC struct {
