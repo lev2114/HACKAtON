@@ -116,15 +116,17 @@ func (s *Server) WS(w http.ResponseWriter, r *http.Request) {
 
 	client := hub.NewClient(conn, player.ID, player.Name, player.Room)
 	s.Hub.Register(client)
+	s.Hub.UpdatePosition(player.ID, player.Room, player.X, player.Y, player.Z)
 	go client.WritePump()
 
 	defer func() {
+		room := s.Hub.RoomOf(player.ID) // перед Unregister — потом хаб его уже не помнит
 		s.Hub.Unregister(player.ID)
 		client.Close()
-		if err := s.Store.SavePosition(player.ID, client.Room, player.X, player.Y, player.Z); err != nil {
+		if err := s.Store.SavePosition(player.ID, room, player.X, player.Y, player.Z); err != nil {
 			log.Printf("disconnect: save error for %s: %v", player.ID, err)
 		}
-		s.Hub.BroadcastToRoom(client.Room, player.ID, map[string]any{
+		s.Hub.BroadcastToRoom(room, player.ID, map[string]any{
 			"type": "player_left", "playerId": player.ID,
 		})
 		conn.Close()
@@ -137,6 +139,9 @@ func (s *Server) WS(w http.ResponseWriter, r *http.Request) {
 		"name":     player.Name,
 		"position": world.Vec3{X: player.X, Y: player.Y, Z: player.Z},
 		"chunk":    chunk,
+		// Кто уже стоит в этой комнате — без этого видно только тех, кто
+		// присоединился/подвинулся ПОСЛЕ тебя, а не тех, кто был раньше.
+		"players": s.Hub.PlayersInRoom(player.Room, player.ID),
 	})
 	s.Hub.BroadcastToRoom(player.Room, player.ID, map[string]any{
 		"type": "player_joined", "playerId": player.ID, "name": player.Name,
@@ -194,15 +199,17 @@ const moveSaveInterval = 1 * time.Second
 
 func (s *Server) onMove(client *hub.Client, player *store.Player, msg incoming) {
 	player.X, player.Y, player.Z = msg.X, msg.Y, msg.Z
+	room := s.Hub.RoomOf(player.ID)
+	s.Hub.UpdatePosition(player.ID, room, msg.X, msg.Y, msg.Z)
 
 	if now := time.Now(); now.Sub(client.LastPersistedMoveAt) >= moveSaveInterval {
 		client.LastPersistedMoveAt = now
-		if err := s.Store.SavePosition(player.ID, client.Room, msg.X, msg.Y, msg.Z); err != nil {
+		if err := s.Store.SavePosition(player.ID, room, msg.X, msg.Y, msg.Z); err != nil {
 			log.Printf("move: save error for %s: %v", player.ID, err)
 		}
 	}
 
-	s.Hub.BroadcastToRoom(client.Room, player.ID, map[string]any{
+	s.Hub.BroadcastToRoom(room, player.ID, map[string]any{
 		"type": "player_moved", "playerId": player.ID, "x": msg.X, "y": msg.Y, "z": msg.Z,
 	})
 }
@@ -214,14 +221,17 @@ func (s *Server) onChunkRequest(client *hub.Client, player *store.Player, msg in
 		return
 	}
 
-	oldRoom := client.Room
-	client.Room = msg.Room
-	s.Hub.SetRoom(player.ID, msg.Room)
+	oldRoom := s.Hub.RoomOf(player.ID)
+	s.Hub.UpdatePosition(player.ID, msg.Room, player.X, player.Y, player.Z)
 	if err := s.Store.SavePosition(player.ID, msg.Room, player.X, player.Y, player.Z); err != nil {
 		log.Printf("chunk_request: save error for %s: %v", player.ID, err)
 	}
 
-	client.Send(map[string]any{"type": "chunk_data", "chunk": chunk})
+	client.Send(map[string]any{
+		"type":    "chunk_data",
+		"chunk":   chunk,
+		"players": s.Hub.PlayersInRoom(msg.Room, player.ID),
+	})
 	s.Hub.BroadcastToRoom(oldRoom, player.ID, map[string]any{"type": "player_left", "playerId": player.ID})
 	s.Hub.BroadcastToRoom(msg.Room, player.ID, map[string]any{
 		"type": "player_joined", "playerId": player.ID, "name": player.Name,

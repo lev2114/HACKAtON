@@ -1,6 +1,12 @@
 // Тонкая обёртка над HTTP-логином и WebSocket-каналом.
 // Протокол сообщений описан в /PROTOCOL.md в корне репозитория.
-const DEFAULT_SERVER = "http://localhost:8080";
+//
+// В dev-режиме (`npm run dev`) клиент на :5173, сервер на :8080 — разные
+// origin, адрес приходится знать заранее. В проде (`npm run build`, сервер
+// сам раздаёт dist/) клиент и API — один и тот же origin: подставляем его,
+// иначе игрок, зашедший с другого ноутбука по LAN на IP сервера, долбился
+// бы в свой собственный localhost:8080 вместо сервера.
+const DEFAULT_SERVER = import.meta.env.DEV ? "http://localhost:8080" : window.location.origin;
 
 export class Net {
   constructor(serverUrl = DEFAULT_SERVER) {

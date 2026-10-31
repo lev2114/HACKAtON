@@ -30,6 +30,7 @@ window.addEventListener("resize", () => {
 });
 
 const players = new Map(); // playerId -> THREE.Mesh
+window.__sharolet.players = players; // для отладки/автотестов, см. строку 18
 let currentRoomBuilt = null;
 let myId = null;
 let myName = null;
@@ -61,8 +62,9 @@ function removePlayerMesh(id) {
   players.delete(id);
 }
 
-// On transitions, place the player just inside the matching return doorway.
-function enterChunk(chunk, teleport) {
+// On transitions, place the player just inside the matching return doorway
+// (computeEntryPoint). roster — те, кто уже стоит в комнате, см. ниже.
+function enterChunk(chunk, teleport, roster) {
   destroyRoom(scene, currentRoomBuilt);
   for (const id of [...players.keys()]) removePlayerMesh(id);
   currentRoomBuilt = buildRoom(scene, chunk);
@@ -76,19 +78,26 @@ function enterChunk(chunk, teleport) {
   net.send("move", { x: camera.position.x, y: camera.position.y, z: camera.position.z });
   hud.textContent = `${myName} · ${chunk.room.name}`;
   chatBox.style.display = "none";
+
+  // Кто уже стоял в комнате до нас — player_joined присылается только за
+  // события ПОСЛЕ нашего входа, без ростера мы бы их никогда не увидели.
+  for (const p of roster || []) {
+    if (p.playerId === myId) continue;
+    spawnPlayerMesh(p.playerId, p.x, p.y, p.z);
+  }
 }
 
 net.on("welcome", (msg) => {
   myId = msg.playerId;
   myName = msg.name;
-  enterChunk(msg.chunk, msg.position);
+  enterChunk(msg.chunk, msg.position, msg.players);
 });
 
 net.on("chunk_data", (msg) => {
   pendingRoomId = null;
   const entry = computeEntryPoint(msg.chunk.room, fromRoomForTransition);
   fromRoomForTransition = null;
-  enterChunk(msg.chunk, entry);
+  enterChunk(msg.chunk, entry, msg.players);
 });
 
 net.on("player_joined", (msg) => {
