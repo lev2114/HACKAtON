@@ -34,7 +34,19 @@ type Room struct {
 	// Model is an optional URL (served by the client's static files) to a
 	// .glb scene that replaces the procedural box geometry for this room.
 	// Empty string = client falls back to the procedural box+floor.
-	Model string `json:"model,omitempty"`
+	Model      string  `json:"model,omitempty"`
+	ModelScale float64 `json:"modelScale,omitempty"`
+	Radius     float64 `json:"radius,omitempty"`
+	Spawn      *Vec3   `json:"spawn,omitempty"`
+	Doors      []Door  `json:"doors,omitempty"`
+}
+
+// Door positions are local to the room, matching its authored GLB coordinates.
+type Door struct {
+	Room      string  `json:"room"`
+	Position  Vec3    `json:"position"`
+	HalfWidth float64 `json:"halfWidth"`
+	ModelDoor string  `json:"modelDoor,omitempty"`
 }
 
 type NPC struct {

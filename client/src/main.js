@@ -61,15 +61,19 @@ function removePlayerMesh(id) {
   players.delete(id);
 }
 
-// Игрок физически доходит до новой комнаты сам (см. collision ниже) —
-// телепортируем камеру только при первом подключении (teleport = позиция
-// игрока из БД), а не при каждой смене чанка, иначе перебьём то место,
-// докуда он реально дошёл.
+// On transitions, place the player just inside the matching return doorway.
 function enterChunk(chunk, teleport) {
   destroyRoom(scene, currentRoomBuilt);
   for (const id of [...players.keys()]) removePlayerMesh(id);
   currentRoomBuilt = buildRoom(scene, chunk);
-  if (teleport) camera.position.set(teleport.x, 1.6, teleport.z);
+  if (teleport) {
+    camera.position.set(teleport.x, teleport.y ?? 1.6, teleport.z);
+    if (teleport.yaw !== undefined) {
+      yaw = teleport.yaw;
+      pitch = 0;
+    }
+  }
+  net.send("move", { x: camera.position.x, y: camera.position.y, z: camera.position.z });
   hud.textContent = `${myName} · ${chunk.room.name}`;
   chatBox.style.display = "none";
 }
@@ -101,7 +105,11 @@ net.on("player_left", (msg) => removePlayerMesh(msg.playerId));
 
 net.on("npc_response", (msg) => showChat(msg.npcName, msg.text));
 
-net.on("error", (msg) => console.warn("server error:", msg.code, msg.message));
+net.on("error", (msg) => {
+  pendingRoomId = null;
+  fromRoomForTransition = null;
+  console.warn("server error:", msg.code, msg.message);
+});
 
 // --- движение: WASD + мышь (pointer lock) ---
 const keys = {};
@@ -148,13 +156,12 @@ const WALL_MARGIN = 0.6; // не даём камере влезть прямо �
 const DOOR_HALF_WIDTH = 3; // ширина прохода к соседней комнате
 
 function roomRadius(room) {
-  return Math.min(room.size.w, room.size.d) / 2;
+  return room.radius || Math.min(room.size.w, room.size.d) / 2;
 }
 
-// Хаб — на модели тиммейта (прямоугольный бокс-коллайдер приближённо под
-// её габариты), остальные комнаты — круглые без модели.
+// Authored station rooms supply a circular radius; legacy models use a box.
 function isBoxRoom(room) {
-  return Boolean(room.model);
+  return Boolean(room.model) && !room.radius;
 }
 
 function isInsideRoom(room, x, z) {
@@ -170,6 +177,9 @@ function isInsideRoom(room, x, z) {
 }
 
 function isInDoorway(room, neighbors, x, z) {
+  if (room.doors) {
+    return room.doors.some((door) => neighbors.some((nb) => nb.id === door.room) && isAtDoor(room, door, x, z));
+  }
   for (const nb of neighbors) {
     const dx = nb.position.x - room.position.x;
     const dz = nb.position.z - room.position.z;
@@ -187,6 +197,16 @@ function isInDoorway(room, neighbors, x, z) {
     if (along > 0 && Math.abs(lateral) < DOOR_HALF_WIDTH) return true;
   }
   return false;
+}
+
+function isAtDoor(room, door, x, z) {
+  const { x: dx, z: dz } = door.position;
+  const length = Math.hypot(dx, dz) || 1;
+  const relX = x - room.position.x;
+  const relZ = z - room.position.z;
+  const along = (relX * dx + relZ * dz) / length;
+  const lateral = (-relX * dz + relZ * dx) / length;
+  return along >= length - 1.5 && along <= length + 1 && Math.abs(lateral) < door.halfWidth;
 }
 
 // Возвращает (x, z), в которые реально можно встать: как есть, если игрок
@@ -218,6 +238,18 @@ function resolveCollision(room, neighbors, x, z) {
 // телепортирует его мимо места, где он реально стоял.
 function computeEntryPoint(newRoom, fromRoom) {
   if (!fromRoom) return null;
+  const door = newRoom.doors?.find((entry) => entry.room === fromRoom.id);
+  if (door) {
+    const { x, z } = door.position;
+    const length = Math.hypot(x, z) || 1;
+    const inset = 1.4;
+    return {
+      x: newRoom.position.x + x - (x / length) * inset,
+      y: newRoom.position.y + 1.6,
+      z: newRoom.position.z + z - (z / length) * inset,
+      yaw: Math.atan2(x, z),
+    };
+  }
   const dx = fromRoom.position.x - newRoom.position.x;
   const dz = fromRoom.position.z - newRoom.position.z;
   const len = Math.hypot(dx, dz) || 1;
@@ -248,6 +280,20 @@ let fromRoomForTransition = null;
 function maybeAutoEnterNeighbor() {
   if (!currentRoomBuilt || pendingRoomId) return;
   const { room, neighbors } = currentRoomBuilt;
+  if (room.doors) {
+    const door = room.doors.find((entry) => {
+      if (!isAtDoor(room, entry, camera.position.x, camera.position.z)) return false;
+      const { x, z } = entry.position;
+      const length = Math.hypot(x, z) || 1;
+      const along = ((camera.position.x - room.position.x) * x + (camera.position.z - room.position.z) * z) / length;
+      return along >= length - 0.35;
+    });
+    if (!door || !neighbors.some((nb) => nb.id === door.room)) return;
+    pendingRoomId = door.room;
+    fromRoomForTransition = room;
+    net.send("chunk_request", { room: door.room });
+    return;
+  }
   if (isInsideRoom(room, camera.position.x, camera.position.z)) return;
 
   const nb = neighbors.find((n) => isInDoorway(room, [n], camera.position.x, camera.position.z));

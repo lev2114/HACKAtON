@@ -1,8 +1,9 @@
 // Строит/разбирает геометрию одной комнаты из chunk_data.
-// Это и есть граница клиентского кеша: в памяти всегда максимум одна
-// комната + её NPC-заглушки, а не весь мир и не база фактов NPC.
+// В сцене одна комната с NPC; загруженные GLB сохраняются в modelCache.
+// База фактов NPC остаётся на сервере.
 import * as THREE from "three";
 import { GLTFLoader } from "three/addons/loaders/GLTFLoader.js";
+import { clone as cloneModel } from "three/addons/utils/SkeletonUtils.js";
 
 const loader = new GLTFLoader();
 // url -> Promise<THREE.Object3D>: модель парсится один раз и переиспользуется
@@ -27,6 +28,11 @@ function loadModel(url) {
 const TARGET_SPAN = 18;
 
 function fitModelToRoom(root, room) {
+  if (room.modelScale) {
+    root.scale.setScalar(room.modelScale);
+    root.position.set(room.position.x, room.position.y, room.position.z);
+    return;
+  }
   const box = new THREE.Box3().setFromObject(root);
   const size = box.getSize(new THREE.Vector3());
   const center = box.getCenter(new THREE.Vector3());
@@ -91,7 +97,7 @@ function buildNpcEntity(scene, roomGroup, npc) {
       .then((sceneRoot) => {
         if (holder.parent !== roomGroup || roomGroup.parent !== scene) return; // уже вышли из комнаты
 
-        const instance = sceneRoot.clone(true);
+        const instance = cloneModel(sceneRoot);
         instance.userData.sharedModel = true;
         fitNpcModel(instance, npc);
 
@@ -130,6 +136,14 @@ const DOOR_HALF_WIDTH = 3;
 // Для процедурных (круглых) комнат геометрия уже сама показывает дыру в
 // стене — свет тут просто подсветка, не замена видимости прохода.
 function addDoorwayLight(group, room, neighbors) {
+  if (room.doors) {
+    for (const door of room.doors) {
+      const light = new THREE.PointLight(0x4fd8ff, 3, 7);
+      light.position.set(room.position.x + door.position.x, room.position.y + 2, room.position.z + door.position.z);
+      group.add(light);
+    }
+    return;
+  }
   for (const nb of neighbors || []) {
     const dx = nb.position.x - room.position.x;
     const dz = nb.position.z - room.position.z;
@@ -206,6 +220,7 @@ function buildModelRoom(scene, group, room) {
     new THREE.MeshStandardMaterial({ color: room.color || "#445566", side: THREE.BackSide })
   );
   placeholder.position.set(room.position.x, room.position.y, room.position.z);
+  if (room.modelScale) placeholder.position.y += room.size.h / 2;
   group.add(placeholder);
 
   loadModel(room.model)
@@ -218,6 +233,7 @@ function buildModelRoom(scene, group, room) {
       // комнату отрисует уже уничтоженные GPU-ресурсы. См. пометку ниже.
       instance.userData.sharedModel = true;
       fitModelToRoom(instance, room);
+      openConnectedDoors(instance, room);
 
       group.remove(placeholder);
       placeholder.geometry.dispose();
@@ -225,6 +241,20 @@ function buildModelRoom(scene, group, room) {
       group.add(instance);
     })
     .catch((err) => console.error(`не удалось загрузить модель комнаты ${room.id}:`, err));
+}
+
+// Keep the authored frames and destination signs, opening only connected leaves.
+// Match GLB extras rather than loader-sanitized node names for the door groups.
+function openConnectedDoors(root, room) {
+  const destinations = new Set((room.doors || []).map((door) => door.modelDoor).filter(Boolean));
+  root.traverse((node) => {
+    if (!node.userData.roomDoor || !destinations.has(node.userData.destination)) return;
+    node.traverse((part) => {
+      if (/sliding.panel|cream.lower.inset|destination.color.strip|central.rubber.seal|large.number/i.test(part.name)) {
+        part.visible = false;
+      }
+    });
+  });
 }
 
 export function destroyRoom(scene, built) {

@@ -78,6 +78,11 @@ func (s *Server) Login(w http.ResponseWriter, r *http.Request) {
 		Token: randomID(),
 		Room:  "hub",
 	}
+	if room, ok := s.World.Rooms[player.Room]; ok && room.Spawn != nil {
+		player.X = room.Position.X + room.Spawn.X
+		player.Y = room.Position.Y + room.Spawn.Y
+		player.Z = room.Position.Z + room.Spawn.Z
+	}
 	if err := s.Store.UpsertPlayer(player); err != nil {
 		log.Printf("login: store error: %v", err)
 		http.Error(w, "internal error", http.StatusInternalServerError)
