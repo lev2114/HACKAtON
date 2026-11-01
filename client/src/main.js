@@ -37,7 +37,22 @@ let myName = null;
 let disconnected = false;
 
 const hud = document.getElementById("hud");
-const chatBox = document.getElementById("chat");
+
+// ── NPC-диалог: DOM-элементы ──
+const npcHint = document.getElementById("npc-hint");
+const npcDialog = document.getElementById("npc-dialog");
+const npcDialogHeader = npcDialog.querySelector(".npc-title");
+const npcDialogClose = npcDialog.querySelector(".close-btn");
+const npcDialogMessages = document.getElementById("npc-dialog-messages");
+const npcDialogInput = document.getElementById("npc-dialog-input");
+const npcDialogSend = document.getElementById("npc-dialog-send");
+
+// ── NPC-диалог: состояние ──
+let chatOpen = false;       // открыт ли диалог
+let chatNpcId = null;       // id NPC, с которым говорим
+let chatNpcName = null;     // имя NPC
+let chatWaiting = false;    // ждём ответ от сервера
+let thinkingEl = null;      // элемент "думает..."
 
 function updateHud() {
   if (!currentRoomBuilt) return;
@@ -46,9 +61,126 @@ function updateHud() {
     : `${myName} · ${currentRoomBuilt.room.name} · Игроков в комнате: ${players.size + 1}`;
 }
 
+// ── Открытие / закрытие диалога ──
+
+function openChat(npcId, npcName) {
+  chatOpen = true;
+  chatNpcId = npcId;
+  chatNpcName = npcName;
+  chatWaiting = false;
+
+  npcDialogHeader.textContent = npcName;
+  npcDialogMessages.innerHTML = "";
+  npcDialog.style.display = "flex";
+  npcHint.style.display = "none";
+
+  // Разблокируем курсор, чтобы можно было печатать
+  if (document.pointerLockElement) {
+    document.exitPointerLock();
+  }
+
+  // Фокус на поле ввода
+  setTimeout(() => npcDialogInput.focus(), 60);
+
+  // Отправляем первое приветственное сообщение
+  addMessage("Вы", "Привет!", true);
+  chatWaiting = true;
+  showThinking();
+  net.send("npc_talk", { npcId: chatNpcId, message: "Привет!" });
+}
+
+function closeChat() {
+  chatOpen = false;
+  chatNpcId = null;
+  chatNpcName = null;
+  chatWaiting = false;
+  thinkingEl = null;
+
+  npcDialog.style.display = "none";
+  npcDialogInput.value = "";
+  npcDialogInput.blur();
+
+  // Возвращаем pointer lock
+  renderer.domElement.requestPointerLock();
+}
+
+// ── Сообщения в чате ──
+
+function addMessage(author, text, isUser) {
+  // Убираем "думает..." если есть
+  removeThinking();
+
+  const div = document.createElement("div");
+  div.className = isUser ? "msg user" : "msg npc";
+  div.innerHTML = `<span class="author">${escapeHtml(author)}:</span> ${escapeHtml(text)}`;
+  npcDialogMessages.appendChild(div);
+  npcDialogMessages.scrollTop = npcDialogMessages.scrollHeight;
+}
+
+function showThinking() {
+  removeThinking();
+  thinkingEl = document.createElement("div");
+  thinkingEl.className = "msg thinking";
+  thinkingEl.textContent = `${chatNpcName} думает…`;
+  npcDialogMessages.appendChild(thinkingEl);
+  npcDialogMessages.scrollTop = npcDialogMessages.scrollHeight;
+}
+
+function removeThinking() {
+  if (thinkingEl && thinkingEl.parentNode) {
+    thinkingEl.parentNode.removeChild(thinkingEl);
+  }
+  thinkingEl = null;
+}
+
+function escapeHtml(str) {
+  const div = document.createElement("div");
+  div.textContent = str;
+  return div.innerHTML;
+}
+
+// ── Отправка сообщения игрока ──
+
+function sendPlayerMessage() {
+  const text = npcDialogInput.value.trim();
+  if (!text || !chatOpen || chatWaiting) return;
+
+  addMessage("Вы", text, true);
+  npcDialogInput.value = "";
+
+  chatWaiting = true;
+  showThinking();
+  net.send("npc_talk", { npcId: chatNpcId, message: text });
+}
+
+// Кнопка отправки
+npcDialogSend.addEventListener("click", sendPlayerMessage);
+
+// Enter в поле ввода
+npcDialogInput.addEventListener("keydown", (e) => {
+  if (e.key === "Enter") {
+    e.preventDefault();
+    sendPlayerMessage();
+  }
+  // Не даём клавишам WASD и E улетать в game-обработчик
+  e.stopPropagation();
+});
+
+// Кнопка закрытия
+npcDialogClose.addEventListener("click", closeChat);
+
+// ── Deprecated: старый showChat — теперь не используется напрямую ──
+// Оставлен для обратной совместимости, если сервер пришлёт ответ вне диалога.
 function showChat(name, text) {
-  chatBox.style.display = "block";
-  chatBox.innerHTML = `<span class="name">${name}:</span>${text}`;
+  if (chatOpen && chatNpcId) {
+    removeThinking();
+    addMessage(name, text, false);
+    chatWaiting = false;
+    // Разблокируем ввод
+    npcDialogInput.disabled = false;
+    npcDialogSend.disabled = false;
+    setTimeout(() => npcDialogInput.focus(), 30);
+  }
 }
 
 function spawnPlayerMesh(id, x, y, z) {
@@ -89,7 +221,9 @@ function enterChunk(chunk, teleport, roster) {
     }
   }
   net.send("move", { x: camera.position.x, y: camera.position.y, z: camera.position.z });
-  chatBox.style.display = "none";
+
+  // Закрываем чат при переходе между комнатами
+  if (chatOpen) closeChat();
 
   // Кто уже стоял в комнате до нас — player_joined присылается только за
   // события ПОСЛЕ нашего входа, без ростера мы бы их никогда не увидели.
@@ -157,14 +291,27 @@ net.on("error", (msg) => {
   pendingRoomId = null;
   fromRoomForTransition = null;
   console.warn("server error:", msg.code, msg.message);
+  // Если ждали ответ NPC — снимаем "думает"
+  if (chatWaiting) {
+    removeThinking();
+    chatWaiting = false;
+  }
 });
 
 // --- движение: WASD + мышь (pointer lock) ---
 const keys = {};
-window.addEventListener("keydown", (e) => (keys[e.code] = true));
-window.addEventListener("keyup", (e) => (keys[e.code] = false));
+window.addEventListener("keydown", (e) => {
+  // Не перехватываем клавиши, если чат открыт и фокус на поле ввода
+  if (chatOpen && document.activeElement === npcDialogInput) return;
+  keys[e.code] = true;
+});
+window.addEventListener("keyup", (e) => {
+  keys[e.code] = false;
+});
 
-renderer.domElement.addEventListener("click", () => renderer.domElement.requestPointerLock());
+renderer.domElement.addEventListener("click", () => {
+  if (!chatOpen) renderer.domElement.requestPointerLock();
+});
 
 let yaw = 0;
 let pitch = 0;
@@ -189,10 +336,26 @@ function findNearestNpc() {
   return closest && closest.dist < 3 ? closest : null;
 }
 
+// Нажатие E — открыть диалог с ближайшим NPC
 window.addEventListener("keydown", (e) => {
+  // Не реагируем на E, если чат уже открыт (чтобы можно было набирать букву "е")
+  if (chatOpen) return;
   if (e.code !== "KeyE") return;
+
   const near = findNearestNpc();
-  if (near) net.send("npc_talk", { npcId: near.id, message: "Расскажи что-нибудь интересное" });
+  if (near) {
+    const npcData = near.npc;
+    const displayName = npcData?.name || near.id;
+    openChat(near.id, displayName);
+  }
+});
+
+// Escape — закрыть диалог
+window.addEventListener("keydown", (e) => {
+  if (e.code === "Escape" && chatOpen) {
+    e.preventDefault();
+    closeChat();
+  }
 });
 
 // Стены комнаты блокируют камеру, КРОМЕ узкого "проёма" в направлении
@@ -361,23 +524,32 @@ function tick() {
   camera.rotation.y = yaw;
   camera.rotation.x = pitch;
 
-  const forward = new THREE.Vector3(-Math.sin(yaw), 0, -Math.cos(yaw));
-  const right = new THREE.Vector3(-forward.z, 0, forward.x);
-  const move = new THREE.Vector3();
-  if (keys["KeyW"]) move.add(forward);
-  if (keys["KeyS"]) move.sub(forward);
-  if (keys["KeyD"]) move.add(right);
-  if (keys["KeyA"]) move.sub(right);
-  if (move.lengthSq() > 0) {
-    move.normalize().multiplyScalar(speed * dt);
-    camera.position.add(move);
+  // Не двигаемся, если открыт чат
+  if (!chatOpen) {
+    const forward = new THREE.Vector3(-Math.sin(yaw), 0, -Math.cos(yaw));
+    const right = new THREE.Vector3(-forward.z, 0, forward.x);
+    const move = new THREE.Vector3();
+    if (keys["KeyW"]) move.add(forward);
+    if (keys["KeyS"]) move.sub(forward);
+    if (keys["KeyD"]) move.add(right);
+    if (keys["KeyA"]) move.sub(right);
+    if (move.lengthSq() > 0) {
+      move.normalize().multiplyScalar(speed * dt);
+      camera.position.add(move);
+    }
   }
 
   if (currentRoomBuilt) {
     const resolved = resolveCollision(currentRoomBuilt.room, currentRoomBuilt.neighbors, camera.position.x, camera.position.z);
     camera.position.x = resolved.x;
     camera.position.z = resolved.z;
-    maybeAutoEnterNeighbor();
+    if (!chatOpen) maybeAutoEnterNeighbor();
+  }
+
+  // Подсказка [E] Поговорить — показывается, когда рядом NPC и чат закрыт
+  if (!chatOpen) {
+    const near = findNearestNpc();
+    npcHint.style.display = near ? "block" : "none";
   }
 
   const now = performance.now();
