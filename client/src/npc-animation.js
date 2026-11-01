@@ -5,6 +5,7 @@ const HEIGHT = 1.7;
 // Round bodies have no separate neck: keep the face, hat and body together.
 const profiles = {
   krosh: { lateral: "z", shoulder: 0.47, armLow: 0.23, armHigh: 0.70, armInner: 0.24, armOuter: 0.32, hip: 0.14, ears: 0.72 },
+  "krosh-classic": { shoulder: 0.28, armLow: 0.19, armHigh: 0.37, hip: 0.10, ears: 0.63 },
   kopatych: { shoulder: 0.55, armLow: 0.40, armHigh: 0.73, hip: 0.15 },
   losyash: { shoulder: 0.44, armLow: 0.30, armHigh: 0.56, hip: 0.13 },
   nyusha: { shoulder: 0.44, armLow: 0.30, armHigh: 0.56, hip: 0.14 },

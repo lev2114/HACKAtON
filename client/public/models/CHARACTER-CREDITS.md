@@ -39,6 +39,17 @@ weights at load time, with gentle idle motion and conversation gestures.
 
 - Source: user-supplied ea2047f1ced0499b9dfe417629c826e2.zip
 - Generator metadata: https://tripo3d.ai
+- Retained as the previous model; no longer used by the main-room NPC.
+
+## krosh-classic-character.glb
+
+- author: Kirill.2099.lol (https://sketchfab.com/Kirillsigma2099)
+- license: CC-BY-4.0 (http://creativecommons.org/licenses/by/4.0/)
+- source: https://sketchfab.com/3d-models/krash-kikorikigogoriki-3c913d3fb4c34191b14b9d53c9df9089
+- title: Крош смешарики||Krash kikoriki||gogoriki
+- Original user-supplied file: 3c913d3fb4c34191b14b9d53c9df9089.glb
+- Unchanged copy; runtime bones/skin weights for body, arms, legs and ears
+  are added by npc-animation.js. Used by Krosh in the main room.
 
 ## Existing models
 

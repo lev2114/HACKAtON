@@ -7,7 +7,7 @@
     "personality": "Энергичный, импульсивный, всё время прыгает и шутит, объясняет физику через свои неудачные попытки что-то подпрыгнуть или удержать равновесие.",
     "position": { "x": 2, "y": 1.055, "z": 1 },
     "factBank": "krosh",
-    "model": "/models/krosh-character.glb"
+    "model": "/models/krosh-classic-character.glb"
   },
   "sovunya": {
     "id": "sovunya",
