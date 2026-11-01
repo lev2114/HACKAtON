@@ -10,6 +10,8 @@ server/station.db
 server/server.log
 server/cert.pem
 server/key.pem
+server/ca-cert.pem
+server/ca-key.pem
 
 # --- локальные артефакты ---
 *.db

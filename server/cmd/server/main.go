@@ -53,7 +53,7 @@ func main() {
 	mux.HandleFunc("/ws", srv.WS)
 	mux.Handle("/", http.FileServer(http.Dir(clientDist)))
 
-	certFile, keyFile, err := ensureSelfSignedCert(certDir)
+	certFile, keyFile, err := ensureTLSCert(certDir)
 	if err != nil {
 		log.Fatalf("не удалось подготовить TLS-сертификат: %v", err)
 	}
