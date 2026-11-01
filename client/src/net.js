@@ -40,6 +40,7 @@ export class Net {
   connect(token) {
     const wsUrl = this.serverUrl.replace(/^http/, "ws") + `/ws?token=${encodeURIComponent(token)}`;
     this.ws = new WebSocket(wsUrl);
+    this.intentionalClose = false;
 
     this.ws.onmessage = (event) => {
       let msg;
@@ -57,10 +58,21 @@ export class Net {
       this.ws.onopen = () => resolve();
       this.ws.onerror = () => reject(new Error(`Не удалось открыть WebSocket: ${this.serverUrl}. Проверь Go-сервер.`));
       this.ws.onclose = () => {
+        // A deliberate disconnect() (logout) closes the socket itself —
+        // that's not the "lost connection" case the disconnect handler
+        // communicates to the player, so it's suppressed here.
+        if (this.intentionalClose) return;
         reject(new Error(`Соединение с ${this.serverUrl} закрыто.`));
         this.handlers.disconnect?.();
       };
     });
+  }
+
+  // Logout: closes the socket without triggering the "lost connection" UI.
+  disconnect() {
+    this.intentionalClose = true;
+    this.ws?.close();
+    this.ws = null;
   }
 
   send(type, payload = {}) {

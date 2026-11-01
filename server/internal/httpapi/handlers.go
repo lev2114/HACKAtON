@@ -11,15 +11,18 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"net"
 	"net/http"
 	"strings"
 	"time"
+	"unicode"
 
 	"github.com/gorilla/websocket"
 	"golang.org/x/crypto/bcrypt"
 
 	"server/internal/ai"
 	"server/internal/hub"
+	"server/internal/ratelimit"
 	"server/internal/store"
 	"server/internal/world"
 )
@@ -31,6 +34,13 @@ type Server struct {
 	AI    *ai.Responder
 
 	upgrader websocket.Upgrader
+
+	// Keyed by client IP. Brute-forcing a password is the realistic threat
+	// here (both endpoints take a name+password over plain HTTP-shaped
+	// requests) — these just make that impractically slow, not impossible.
+	// Hackathon-scale: in-memory, per-process, no cleanup of old keys.
+	loginLimiter    *ratelimit.Limiter
+	registerLimiter *ratelimit.Limiter
 }
 
 func New(w *world.World, st *store.Store, h *hub.Hub, responder *ai.Responder) *Server {
@@ -46,7 +56,24 @@ func New(w *world.World, st *store.Store, h *hub.Hub, responder *ai.Responder) *
 			// hosts/ports, so we don't restrict origins.
 			CheckOrigin: func(r *http.Request) bool { return true },
 		},
+		loginLimiter:    ratelimit.New(8, 30*time.Second),
+		registerLimiter: ratelimit.New(5, 60*time.Second),
 	}
+}
+
+// clientIP strips the port off RemoteAddr for use as a rate-limit key. Falls
+// back to the raw value if it isn't a "host:port" pair (shouldn't happen via
+// net/http, but better than panicking on malformed input).
+func clientIP(r *http.Request) string {
+	host, _, err := net.SplitHostPort(r.RemoteAddr)
+	if err != nil {
+		return r.RemoteAddr
+	}
+	return host
+}
+
+func rateLimitMessage(retryAfter time.Duration) string {
+	return fmt.Sprintf("слишком много попыток, попробуй снова через %d сек", int(retryAfter.Seconds())+1)
 }
 
 func randomID() string {
@@ -85,15 +112,51 @@ func decodeAuthRequest(r *http.Request) (authRequest, error) {
 	if req.Name == "" {
 		return req, fmt.Errorf("имя не может быть пустым")
 	}
-	if len(req.Password) < 4 {
-		return req, fmt.Errorf("пароль должен быть не короче 4 символов")
+	if req.Password == "" {
+		return req, fmt.Errorf("пароль не может быть пустым")
 	}
 	return req, nil
 }
 
+const passwordPolicyMessage = "пароль должен быть не короче 8 символов и содержать цифру, строчную и заглавную букву"
+
+// validatePasswordPolicy only applies to NEW passwords (registration). Login
+// deliberately doesn't re-check it — accounts created before this policy
+// existed still have short/weak-by-today's-rules passwords, and login has to
+// keep accepting those or every existing player gets locked out.
+func validatePasswordPolicy(password string) error {
+	if len(password) < 8 {
+		return errors.New(passwordPolicyMessage)
+	}
+	var hasDigit, hasLower, hasUpper bool
+	for _, r := range password {
+		switch {
+		case unicode.IsDigit(r):
+			hasDigit = true
+		case unicode.IsLower(r):
+			hasLower = true
+		case unicode.IsUpper(r):
+			hasUpper = true
+		}
+	}
+	if !hasDigit || !hasLower || !hasUpper {
+		return errors.New(passwordPolicyMessage)
+	}
+	return nil
+}
+
 func (s *Server) Register(w http.ResponseWriter, r *http.Request) {
+	if allowed, retryAfter := s.registerLimiter.Allow(clientIP(r)); !allowed {
+		writeJSONError(w, http.StatusTooManyRequests, rateLimitMessage(retryAfter))
+		return
+	}
+
 	req, err := decodeAuthRequest(r)
 	if err != nil {
+		writeJSONError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	if err := validatePasswordPolicy(req.Password); err != nil {
 		writeJSONError(w, http.StatusBadRequest, err.Error())
 		return
 	}
@@ -137,6 +200,11 @@ func (s *Server) Register(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) Login(w http.ResponseWriter, r *http.Request) {
+	if allowed, retryAfter := s.loginLimiter.Allow(clientIP(r)); !allowed {
+		writeJSONError(w, http.StatusTooManyRequests, rateLimitMessage(retryAfter))
+		return
+	}
+
 	req, err := decodeAuthRequest(r)
 	if err != nil {
 		writeJSONError(w, http.StatusBadRequest, err.Error())

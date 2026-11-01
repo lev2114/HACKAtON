@@ -10,7 +10,7 @@
 
       #login {
         position: fixed; inset: 0; display: flex; align-items: center; justify-content: center;
-        background: #05060a; z-index: 10;
+        background: #0a0712; z-index: 10;
       }
       #login .panel { display: flex; flex-direction: column; gap: 12px; width: min(320px, 90vw); }
       #login .tabs { display: flex; gap: 4px; }
@@ -25,6 +25,22 @@
       #login button { padding: 10px 16px; font-size: 16px; cursor: pointer; border-radius: 6px; border: none; background: #4a7cff; color: white; }
       #login button:disabled { opacity: 0.6; cursor: default; }
       #login .error { color: #ff8a8a; font-size: 13px; min-height: 16px; }
+      #login .hint { color: #8a93b8; font-size: 12px; margin-top: -4px; }
+
+      #pause:not([hidden]) {
+        position: fixed; inset: 0; display: flex; align-items: center; justify-content: center;
+        background: rgba(5, 6, 10, 0.72); z-index: 15;
+      }
+      #pause .panel {
+        display: flex; flex-direction: column; gap: 10px; width: min(280px, 90vw);
+        background: #12142280; padding: 20px; border-radius: 10px; text-align: center;
+      }
+      #pause h2 { margin: 0 0 6px; color: #e8ecff; font-size: 18px; font-weight: 600; }
+      #pause button {
+        padding: 10px 16px; font-size: 15px; cursor: pointer; border-radius: 6px; border: none; color: white;
+      }
+      #pause-resume { background: #4a7cff; }
+      #pause-exit { background: #3a3f55; }
 
       #hud {
         position: fixed; top: 12px; left: 12px; color: #cfd8ff; font-size: 14px;
@@ -49,12 +65,20 @@
           <div class="tab active" data-mode="login">Вход</div>
           <div class="tab" data-mode="register">Регистрация</div>
         </div>
-        <form id="login-form">
+        <form id="login-form" novalidate>
           <input id="login-name" placeholder="Имя космонавта" maxlength="20" required autofocus autocomplete="username" />
-          <input id="login-password" type="password" placeholder="Пароль" minlength="4" required autocomplete="current-password" />
+          <input id="login-password" type="password" placeholder="Пароль" minlength="8" required autocomplete="current-password" />
+          <div class="hint" id="login-password-hint" hidden>Минимум 8 символов, цифра, строчная и заглавная буква</div>
           <div class="error" id="login-error"></div>
           <button type="submit" id="login-submit">Войти на станцию</button>
         </form>
+      </div>
+    </div>
+    <div id="pause" hidden>
+      <div class="panel">
+        <h2>Пауза</h2>
+        <button type="button" id="pause-resume">Продолжить</button>
+        <button type="button" id="pause-exit">Выйти</button>
       </div>
     </div>
     <div id="hud"></div>

@@ -59,23 +59,12 @@ func main() {
 	}
 
 	log.Printf("Шаролёт слушает на https://%s (world=%s, ollama=%q)", addr, worldDir, ollamaURL)
-	if err := http.ListenAndServeTLS(addr, certFile, keyFile, withCORS(mux)); err != nil {
+	// No CORS headers: Vite's dev/preview proxy forwards /api and /ws to Go
+	// server-side (vite.config.js), so the browser only ever talks to the
+	// page's own origin — there's no legitimate cross-origin browser request
+	// to this server to allow for. A wildcard Access-Control-Allow-Origin
+	// here would just be unused attack surface.
+	if err := http.ListenAndServeTLS(addr, certFile, keyFile, mux); err != nil {
 		log.Fatal(err)
 	}
-}
-
-// withCORS lets the Vite dev server (a different port) talk to this API
-// during development. Harmless for the LAN demo since there's no untrusted
-// third party on the network.
-func withCORS(next http.Handler) http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Access-Control-Allow-Origin", "*")
-		w.Header().Set("Access-Control-Allow-Headers", "Content-Type")
-		w.Header().Set("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
-		if r.Method == http.MethodOptions {
-			w.WriteHeader(http.StatusNoContent)
-			return
-		}
-		next.ServeHTTP(w, r)
-	})
 }
