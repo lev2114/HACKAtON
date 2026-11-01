@@ -399,6 +399,123 @@ function makeNameTag(name) {
   return sprite;
 }
 
+
+// Облачко сообщения над головой игрока (THREE.Sprite billboard)
+function createSpeechBubbleSprite(text) {
+  const canvas = document.createElement("canvas");
+  canvas.width = 1024;
+  canvas.height = 512;
+  const ctx = canvas.getContext("2d");
+
+  // Увеличенный чёткий шрифт
+  const fontSize = 42;
+  const lineHeight = 54;
+  ctx.font = "bold " + fontSize + "px system-ui, -apple-system, sans-serif";
+
+  const maxWidth = 880;
+  const words = text.split(" ");
+  const lines = [];
+  let cur = "";
+
+  for (const w of words) {
+    const test = cur ? cur + " " + w : w;
+    if (ctx.measureText(test).width > maxWidth && cur) {
+      lines.push(cur);
+      cur = w;
+      if (lines.length >= 3) break;
+    } else {
+      cur = test;
+    }
+  }
+  if (cur && lines.length < 3) lines.push(cur);
+  if (lines.length === 3 && words.length > lines.join(" ").split(" ").length) {
+    lines[2] += "…";
+  }
+
+  let maxW = 0;
+  for (const l of lines) {
+    const w = ctx.measureText(l).width;
+    if (w > maxW) maxW = w;
+  }
+  // Увеличенная плашка с комфортными отступами
+  const bubbleW = Math.max(300, Math.min(960, maxW + 72));
+  const bubbleH = 46 + lines.length * lineHeight;
+  const x = (1024 - bubbleW) / 2;
+  const y = 420 - bubbleH;
+  const radius = 24;
+
+  ctx.save();
+  ctx.shadowColor = "rgba(0, 0, 0, 0.75)";
+  ctx.shadowBlur = 20;
+  ctx.shadowOffsetY = 6;
+
+  ctx.beginPath();
+  ctx.moveTo(x + radius, y);
+  ctx.lineTo(x + bubbleW - radius, y);
+  ctx.quadraticCurveTo(x + bubbleW, y, x + bubbleW, y + radius);
+  ctx.lineTo(x + bubbleW, y + bubbleH - radius);
+  ctx.quadraticCurveTo(x + bubbleW, y + bubbleH, x + bubbleW - radius, y + bubbleH);
+  // Стрелочка вниз по центру, указывает на шлем
+  ctx.lineTo(512 + 20, y + bubbleH);
+  ctx.lineTo(512, y + bubbleH + 28);
+  ctx.lineTo(512 - 20, y + bubbleH);
+  ctx.lineTo(x + radius, y + bubbleH);
+  ctx.quadraticCurveTo(x, y + bubbleH, x, y + bubbleH - radius);
+  ctx.lineTo(x, y + radius);
+  ctx.quadraticCurveTo(x, y, x + radius, y);
+  ctx.closePath();
+
+  ctx.fillStyle = "rgba(10, 14, 30, 0.95)";
+  ctx.fill();
+
+  ctx.strokeStyle = "#4fd8ff";
+  ctx.lineWidth = 5;
+  ctx.stroke();
+  ctx.restore();
+
+  ctx.font = "bold " + fontSize + "px system-ui, -apple-system, sans-serif";
+  ctx.fillStyle = "#ffffff";
+  ctx.textAlign = "center";
+  ctx.textBaseline = "middle";
+
+  const startY = y + 24 + lineHeight / 2;
+  for (let i = 0; i < lines.length; i++) {
+    ctx.fillText(lines[i], 512, startY + i * lineHeight);
+  }
+
+  const texture = new THREE.CanvasTexture(canvas);
+  const sprite = new THREE.Sprite(new THREE.SpriteMaterial({ map: texture, depthTest: false, transparent: true }));
+  // Увеличенный масштаб в 3D мире (~4.8м ширина, ~2.4м высота)
+  const worldW = (bubbleW / 1024) * 4.8;
+  const worldH = ((bubbleH + 34) / 512) * 2.4;
+  sprite.scale.set(worldW, worldH, 1);
+  sprite.position.y = 0.9 + worldH / 2;
+  sprite.renderOrder = 10;
+  return sprite;
+}
+
+function showPlayerSpeechBubble(mesh, text) {
+  if (!mesh) return;
+  if (mesh.userData.speechSprite) {
+    mesh.remove(mesh.userData.speechSprite);
+    if (mesh.userData.speechSprite.material?.map) mesh.userData.speechSprite.material.map.dispose();
+    mesh.userData.speechSprite.material?.dispose();
+    clearTimeout(mesh.userData.speechTimer);
+    mesh.userData.speechSprite = null;
+  }
+  const sprite = createSpeechBubbleSprite(text);
+  mesh.add(sprite);
+  mesh.userData.speechSprite = sprite;
+  mesh.userData.speechTimer = setTimeout(() => {
+    if (mesh.userData.speechSprite === sprite) {
+      mesh.remove(sprite);
+      if (sprite.material?.map) sprite.material.map.dispose();
+      sprite.material?.dispose();
+      mesh.userData.speechSprite = null;
+    }
+  }, 6500);
+}
+
 function spawnPlayerMesh(id, name, x, y, z, appearance = {}) {
   const existing = players.get(id);
   if (existing) {
@@ -418,6 +535,7 @@ function spawnPlayerMesh(id, name, x, y, z, appearance = {}) {
 function removePlayerMesh(id) {
   const mesh = players.get(id);
   if (!mesh) return;
+  clearTimeout(mesh.userData.speechTimer);
   scene.remove(mesh);
   for (const child of mesh.children) {
     if (child.material?.map) child.material.map.dispose();
@@ -543,8 +661,19 @@ net.on("player_left", (msg) => {
   updateHud();
 });
 
+net.onPlayerChat((msg) => {
+  const isMe = msg.playerId === myId;
+  addPlayerChatMessage(msg.name, msg.text, isMe, msg.room);
+  if (!isMe) {
+    const mesh = players.get(msg.playerId);
+    if (mesh) showPlayerSpeechBubble(mesh, msg.text);
+  }
+});
+
 net.on("disconnect", () => {
   disconnected = true;
+  closePlayerChat();
+  if (playerChatLog) playerChatLog.innerHTML = "";
   for (const id of [...players.keys()]) removePlayerMesh(id);
   updateHud();
 });
@@ -580,6 +709,86 @@ net.on("error", (msg) => {
   }
 });
 
+// ── Чат между игроками (Enter) ──
+const playerChatLog = document.getElementById("player-chat-log");
+const playerChatBarWrap = document.getElementById("player-chat-bar-wrap");
+const playerChatInput = document.getElementById("player-chat-input");
+const playerChatSend = document.getElementById("player-chat-send");
+let playerChatOpen = false;
+
+function addPlayerChatMessage(name, text, isMe, room) {
+  if (!playerChatLog) return;
+  const entry = document.createElement("div");
+  entry.className = isMe ? "chat-log-msg me" : "chat-log-msg";
+
+  const author = document.createElement("span");
+  author.className = "author";
+  author.textContent = (isMe ? "Вы" : (name || "Космонавт")) + ":";
+  entry.appendChild(author);
+
+  const body = document.createElement("span");
+  body.className = "text";
+  body.textContent = text;
+  entry.appendChild(body);
+
+  playerChatLog.prepend(entry);
+
+  while (playerChatLog.children.length > 10) {
+    playerChatLog.removeChild(playerChatLog.lastChild);
+  }
+
+  setTimeout(() => {
+    entry.style.opacity = "0.35";
+  }, 10000);
+}
+
+function openPlayerChat() {
+  if (!playerChatBarWrap || !playerChatInput) return;
+  playerChatOpen = true;
+  playerChatBarWrap.style.display = "block";
+  clearMovementKeys();
+  if (document.pointerLockElement) document.exitPointerLock();
+  setTimeout(() => {
+    if (!playerChatOpen) return;
+    playerChatInput.value = "";
+    playerChatInput.focus();
+  }, 20);
+}
+
+function closePlayerChat() {
+  if (!playerChatBarWrap || !playerChatInput) return;
+  playerChatOpen = false;
+  playerChatBarWrap.style.display = "none";
+  playerChatInput.blur();
+  clearMovementKeys();
+}
+
+function sendPlayerChatMessage() {
+  if (!playerChatInput) return;
+  const text = playerChatInput.value.trim();
+  if (text.length > 0) {
+    net.sendPlayerChat(text);
+  }
+  closePlayerChat();
+}
+
+if (playerChatSend) {
+  playerChatSend.addEventListener("click", () => sendPlayerChatMessage());
+}
+
+if (playerChatInput) {
+  playerChatInput.addEventListener("keydown", (e) => {
+    e.stopPropagation();
+    if (e.key === "Enter") {
+      e.preventDefault();
+      sendPlayerChatMessage();
+    } else if (e.key === "Escape") {
+      e.preventDefault();
+      closePlayerChat();
+    }
+  });
+}
+
 // --- движение: WASD + мышь (pointer lock) + прыжок (Space) ---
 const JUMP_SPEED = 5.2; // м/с начальная скорость прыжка
 const GRAVITY = 15.0;   // м/с² гравитация
@@ -589,10 +798,38 @@ let isJumping = false;
 
 const keys = {};
 window.addEventListener("keydown", (event) => {
-  if (event.code !== "KeyF" || event.repeat || !running || paused || chatOpen || disconnected || !currentRoomBuilt?.ready) return;
+  if (event.code !== "KeyF" || event.repeat || !running || paused || chatOpen || playerChatOpen || disconnected || !currentRoomBuilt?.ready) return;
   net.useApple();
 });
 window.addEventListener("keydown", (e) => {
+  // Нажатие Enter открывает или отправляет чат игроков
+  if (e.code === "Enter" || e.code === "NumpadEnter") {
+    if (!chatOpen && running && !paused) {
+      if (!playerChatOpen) {
+        e.preventDefault();
+        openPlayerChat();
+        return;
+      } else {
+        e.preventDefault();
+        sendPlayerChatMessage();
+        return;
+      }
+    }
+  }
+
+  // Нажатие Escape закрывает чат игроков
+  if (e.code === "Escape") {
+    if (playerChatOpen) {
+      e.preventDefault();
+      closePlayerChat();
+      e.stopImmediatePropagation();
+      return;
+    }
+  }
+
+  // Если чат игроков открыт — не даём ходить/прыгать
+  if (playerChatOpen) return;
+
   if (e.code === "Space") {
     if (!chatOpen && running && !paused && document.activeElement?.tagName !== "INPUT") {
       e.preventDefault();
@@ -602,7 +839,7 @@ window.addEventListener("keydown", (e) => {
       }
     }
   }
-  // Не перехватываем клавиши, если чат открыт и фокус на поле ввода
+  // Не перехватываем клавиши, если диалог NPC открыт и фокус на поле ввода
   if (chatOpen && document.activeElement === npcDialogInput) return;
   keys[e.code] = true;
 });
@@ -616,7 +853,7 @@ window.addEventListener("blur", clearMovementKeys);
 document.addEventListener("visibilitychange", () => { if (document.hidden) clearMovementKeys(); });
 
 renderer.domElement.addEventListener("click", () => {
-  if (!chatOpen && running && !paused) renderer.domElement.requestPointerLock();
+  if (!chatOpen && !playerChatOpen && running && !paused) renderer.domElement.requestPointerLock();
 });
 
 let yaw = 0;
@@ -650,7 +887,7 @@ function findNearestNpc() {
 // Nearby doorway controls take priority over NPC interaction.
 window.addEventListener("keydown", (e) => {
   // Не реагируем на E, если чат уже открыт (чтобы можно было набирать букву "е")
-  if (chatOpen) return;
+  if (chatOpen || playerChatOpen) return;
   if (e.code !== "KeyE" || e.repeat || !running || paused || disconnected || pendingRoomId || !currentRoomBuilt?.ready) return;
 
   const door = currentRoomBuilt.doors.nearest(camera.position, yaw);
@@ -870,7 +1107,7 @@ function tick() {
     lastConversationHeartbeat = performance.now();
   }
 
-  if (!paused && !chatOpen) {
+  if (!paused && !chatOpen && !playerChatOpen) {
     camera.rotation.y = yaw;
     camera.rotation.x = pitch;
 
@@ -960,6 +1197,8 @@ function stopGame() {
   isJumping = false;
   verticalVelocity = 0;
   if (chatOpen) closeChat(false);
+  closePlayerChat();
+  if (playerChatLog) playerChatLog.innerHTML = "";
   net.disconnect();
   if (document.pointerLockElement) document.exitPointerLock();
 

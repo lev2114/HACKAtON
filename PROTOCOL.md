@@ -102,6 +102,7 @@
 | `move`          | `x, y, z` (float)                 | обновляет позицию игрока, транслируется остальным в той же комнате |
 | `chunk_request` | `room` (string, id комнаты)       | игрок переходит в другую комнату, запрашивает её данные            |
 | `npc_talk`      | `npcId` (string), `message` (string), `requestId` (number) | игрок обращается к NPC в открытом чате |
+| `chat`          | `text` (string) | сообщение игрока всем подключённым игрокам; `message` допускается как запасное поле |
 | `npc_conversation` | `npcId` (string), `active` (boolean) | начать/поддержать или завершить разговор |
 | `pong`          | `id, fps, frameMs, memoryMB, drawCalls, triangles, paused, chatOpen, gpu` | ответ на серверный `ping` (метрики для админки) |
 
@@ -121,11 +122,20 @@
 | `player_joined`  | `playerId, name, x, y, z`                              | кто-то зашёл в комнату, где ты сейчас находишься |
 | `player_moved`   | `playerId, x, y, z`                                    | кто-то в твоей комнате сдвинулся                 |
 | `player_left`    | `playerId`                                              | кто-то вышел из твоей комнаты (или отключился)   |
+| `player_chat`    | `playerId, name, text, room, timestamp`                  | сообщение чата всем игрокам, включая автора; `timestamp` — Unix milliseconds |
 | `npc_response`   | `npcId, npcName, text, requestId`                       | ответ NPC на `npc_talk`                          |
 | `ping`           | `id`                                                    | каждые 2 с; клиент сразу отвечает `pong` с тем же `id` |
 | `settings`       | `settings{walkSpeed, sprintSpeed}`                      | администратор изменил скорости (также внутри `welcome`) |
 | `announcement`   | `text`                                                  | объявление администратора всем игрокам           |
 | `error`          | `code, message, requestId?`                             | невалидный запрос; `npc_out_of_reach` / `npc_busy` — см. "Wandering NPCs", `kicked` — администратор отключил игрока |
+
+Чат игроков: сервер удаляет пробелы по краям, игнорирует пустые сообщения,
+обрезает текст до 200 Unicode-символов и заменяет распознанную брань звёздочками.
+`name`, `playerId` и `room` берутся на сервере. Рассылка глобальная, без хранения
+истории; клиентский ввод ограничен 150 символами. `player_chat` отображается
+в журнале, а над чужим игроком в текущей комнате — ещё и 3D-облачком на 6.5 с.
+Регистрация обработчика и отправка проходят через `Net.onPlayerChat` /
+`Net.sendPlayerChat` в `net.js`.
 
 **Ping** считает сервер: время от отправки `ping` до получения `pong` с тем
 же `id`. Это RTT уровня приложения — сеть плюс задержка главного потока

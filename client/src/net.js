@@ -40,6 +40,14 @@ export class Net {
     this.send("use_item", { item: "apple" });
   }
 
+  onPlayerChat(handler) {
+    this.on("player_chat", handler);
+  }
+
+  sendPlayerChat(text) {
+    this.send("chat", { text });
+  }
+
   async register(name, password) {
     return this.#auth("register", name, password);
   }

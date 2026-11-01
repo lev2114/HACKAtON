@@ -181,6 +181,112 @@
       #npc-dialog-messages::-webkit-scrollbar { width: 5px; }
       #npc-dialog-messages::-webkit-scrollbar-track { background: transparent; }
       #npc-dialog-messages::-webkit-scrollbar-thumb { background: rgba(90, 130, 255, 0.25); border-radius: 3px; }
+
+      /* ── Чат игроков (HUD лог и строка ввода) ── */
+      #player-chat-log {
+        position: fixed;
+        bottom: 75px;
+        left: 18px;
+        width: min(440px, 45vw);
+        max-height: 220px;
+        display: flex;
+        flex-direction: column-reverse; /* Новые сообщения снизу */
+        gap: 6px;
+        overflow-y: hidden;
+        pointer-events: none;
+        z-index: 15;
+      }
+      .chat-log-msg {
+        background: rgba(10, 14, 30, 0.85);
+        backdrop-filter: blur(8px);
+        border: 1px solid rgba(79, 216, 255, 0.25);
+        border-radius: 8px;
+        padding: 6px 12px;
+        color: #e8ecff;
+        font-size: 13.5px;
+        line-height: 1.35;
+        box-shadow: 0 2px 10px rgba(0, 0, 0, 0.4);
+        animation: chatFadeIn 0.25s ease-out;
+        transition: opacity 0.5s ease;
+        word-break: break-word;
+      }
+      .chat-log-msg.me {
+        border-color: rgba(94, 252, 130, 0.35);
+      }
+      .chat-log-msg .author {
+        font-weight: 700;
+        color: #4fd8ff;
+        margin-right: 6px;
+      }
+      .chat-log-msg.me .author {
+        color: #5efc82;
+      }
+      .chat-log-msg .room-tag {
+        font-size: 11px;
+        color: #8a9bb8;
+        margin-right: 6px;
+      }
+      @keyframes chatFadeIn {
+        from { opacity: 0; transform: translateY(6px); }
+        to { opacity: 1; transform: translateY(0); }
+      }
+
+      #player-chat-bar-wrap {
+        position: fixed;
+        bottom: 24px;
+        left: 50%;
+        transform: translateX(-50%);
+        width: min(600px, 92vw);
+        z-index: 25;
+        display: none;
+      }
+      #player-chat-bar {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        background: rgba(10, 14, 32, 0.94);
+        backdrop-filter: blur(12px);
+        border: 1.5px solid #4fd8ff;
+        border-radius: 12px;
+        padding: 6px 10px;
+        box-shadow: 0 4px 24px rgba(0, 0, 0, 0.6), 0 0 16px rgba(79, 216, 255, 0.25);
+      }
+      .chat-prefix {
+        color: #4fd8ff;
+        font-weight: 700;
+        font-size: 14px;
+        white-space: nowrap;
+        user-select: none;
+      }
+      #player-chat-input {
+        flex: 1;
+        background: transparent;
+        border: none;
+        outline: none;
+        color: #ffffff;
+        font-size: 14px;
+        font-family: inherit;
+        padding: 6px 8px;
+      }
+      #player-chat-input::placeholder {
+        color: #6d7b99;
+      }
+      #player-chat-send {
+        background: #3867d6;
+        color: #ffffff;
+        border: none;
+        border-radius: 8px;
+        padding: 6px 14px;
+        font-weight: 600;
+        font-size: 13px;
+        cursor: pointer;
+        transition: background 0.15s;
+        white-space: nowrap;
+      }
+      #player-chat-send:hover {
+        background: #4b7bec;
+      }
+
     </style>
   </head>
   <body>
@@ -215,10 +321,21 @@
     </div>
     <div id="announcement" hidden></div>
     <div id="controls">
-      WASD — двигаться · Shift — бежать · мышь (ЛКМ, затем двигать) — осмотреться<br />
-      E — открыть/закрыть дверь или поговорить · переход через открытую дверь
+      WASD — двигаться · Пробел — прыжок · Shift — бежать · мышь — осмотреться<br />
+      Enter — чат игроков · E — говорить / двери · Esc — пауза
     </div>
     <div id="npc-hint">[E] Поговорить</div>
+
+    <!-- Чат игроков -->
+    <div id="player-chat-log"></div>
+
+    <div id="player-chat-bar-wrap">
+      <div id="player-chat-bar">
+        <span class="chat-prefix">💬 Чат:</span>
+        <input id="player-chat-input" type="text" placeholder="Напишите сообщение... (Enter — отправить, Esc — отмена)" maxlength="150" autocomplete="off" />
+        <button id="player-chat-send" type="button">Отправить</button>
+      </div>
+    </div>
 
     <div id="npc-dialog">
       <div id="npc-dialog-header">

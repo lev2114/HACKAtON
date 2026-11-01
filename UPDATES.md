@@ -18,6 +18,14 @@
 
 ---
 
+## 2026-11-01 17:57 — Codex — merge feature/player-chat в main
+- После fetch/pull main = 02f83d1, source = c244aeb; backup codex/main-before-player-chat-02f83d1. История обеих веток сохранена.
+- Разрешены конфликты main.js/handlers.go: сохранены appearance/яблоки/ConversationID и добавлены chat/Text/облачка. Enter открывает/отправляет чат; Esc закрывает.
+- Ввод не запускает F/E/движение/прыжок или паузу; UI очищается при logout/disconnect, таймер облачка — при удалении аватара. Исправлено смещение очистки чата в NPC error handler при auto-merge.
+- [BREAKING: расширение протокола] Добавлены chat → player_chat, глобальная рассылка с серверным фильтром; поля и лимиты описаны в PROTOCOL.md, обёртки в net.js.
+- Client build и Go build/vet прошли. Тесты и игра не запускались.
+Следующий шаг: перезапустить Go и обновить клиенты; Enter — сообщение всем игрокам.
+
 ## 2026-11-01 — Codex — merge llm_to_world в свежий main
 - Сначала fetch/pull: main обновлён с d92f203 до 53e1272; llm_to_world — 9174de6. Создана backup-ветка codex/main-before-world-actions-53e1272, история не переписывалась.
 - Добавлены яблоко Совуньи, проводник Крош, цвет скафандра Нюши и общий persisted player_state; сохранены новые main: Space jump, BVH, embedded-текстура Пина, масштаб/skin weights Кроша и корректная выгрузка при logout.
