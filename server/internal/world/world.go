@@ -1,7 +1,6 @@
-// Package world loads the static station data (rooms, NPCs, facts) from
-// JSON files and answers the two questions the rest of the server needs:
-// "what does this room look like" (Chunk) and "what should this NPC say
-// next to this specific player" (PickFact).
+// Package world loads rooms, NPCs, and facts from disk, and serves them
+// as chunks to the client. The client is only allowed to cache the chunk
+// for the room the player is currently in (≤10% of total world data).
 package world
 
 import (
@@ -18,36 +17,32 @@ type Vec3 struct {
 	Z float64 `json:"z"`
 }
 
-type Size3 struct {
+type Size struct {
 	W float64 `json:"w"`
 	H float64 `json:"h"`
 	D float64 `json:"d"`
 }
 
-type Room struct {
-	ID         string   `json:"id"`
-	Name       string   `json:"name"`
-	Position   Vec3     `json:"position"`
-	Size       Size3    `json:"size"`
-	Color      string   `json:"color"`
-	NpcID      *string  `json:"npcId"`
-	ConnectsTo []string `json:"connectsTo"`
-	// Model is an optional URL (served by the client's static files) to a
-	// .glb scene that replaces the procedural box geometry for this room.
-	// Empty string = client falls back to the procedural box+floor.
-	Model      string  `json:"model,omitempty"`
-	ModelScale float64 `json:"modelScale,omitempty"`
-	Radius     float64 `json:"radius,omitempty"`
-	Spawn      *Vec3   `json:"spawn,omitempty"`
-	Doors      []Door  `json:"doors,omitempty"`
-}
-
-// Door positions are local to the room, matching its authored GLB coordinates.
-type Door struct {
+type Doorway struct {
 	Room      string  `json:"room"`
 	Position  Vec3    `json:"position"`
 	HalfWidth float64 `json:"halfWidth"`
 	ModelDoor string  `json:"modelDoor,omitempty"`
+}
+
+type Room struct {
+	ID         string    `json:"id"`
+	Name       string    `json:"name"`
+	Position   Vec3      `json:"position"`
+	Size       Size      `json:"size"`
+	Color      string    `json:"color"`
+	Model      string    `json:"model,omitempty"`
+	ModelScale float64   `json:"modelScale,omitempty"`
+	Radius     float64   `json:"radius,omitempty"`
+	Spawn      *Vec3     `json:"spawn,omitempty"`
+	Doors      []Doorway `json:"doors,omitempty"`
+	NPCID      string    `json:"npcId"`
+	ConnectsTo []string  `json:"connectsTo"`
 }
 
 type NPC struct {
@@ -58,10 +53,7 @@ type NPC struct {
 	Personality string `json:"personality"`
 	Position    Vec3   `json:"position"`
 	FactBank    string `json:"factBank"`
-	// Model is an optional URL to a .glb character model that replaces the
-	// placeholder sphere on the client. Empty = client falls back to the
-	// sphere, same as rooms without a Model (see Room.Model).
-	Model string `json:"model,omitempty"`
+	Model       string `json:"model,omitempty"`
 }
 
 type Fact struct {
@@ -71,42 +63,67 @@ type Fact struct {
 	Text       string `json:"text"`
 }
 
-// World holds the full station dataset. In the "no more than 10% cached on
-// client" rule, THIS is the 100%: clients only ever see one Room (via Chunk)
-// at a time and individual Facts one at a time (via PickFact), never
-// the full Facts map.
+// World holds the static dataset loaded once at server startup.
 type World struct {
 	Rooms map[string]Room
 	NPCs  map[string]NPC
-	Facts map[string][]Fact // keyed by NPC factBank id
+	Facts map[string][]Fact // npcId -> facts
 }
 
 func Load(dir string) (*World, error) {
-	w := &World{}
+	roomsPath := filepath.Join(dir, "rooms.json")
+	npcsPath := filepath.Join(dir, "npcs.json")
+	factsPath := filepath.Join(dir, "facts.json")
 
-	if err := loadJSON(filepath.Join(dir, "rooms.json"), &w.Rooms); err != nil {
-		return nil, fmt.Errorf("rooms.json: %w", err)
-	}
-	if err := loadJSON(filepath.Join(dir, "npcs.json"), &w.NPCs); err != nil {
-		return nil, fmt.Errorf("npcs.json: %w", err)
-	}
-	if err := loadJSON(filepath.Join(dir, "facts.json"), &w.Facts); err != nil {
-		return nil, fmt.Errorf("facts.json: %w", err)
-	}
-
-	return w, nil
-}
-
-func loadJSON(path string, out any) error {
-	raw, err := os.ReadFile(path)
+	rooms, err := loadJSON[map[string]Room](roomsPath)
 	if err != nil {
-		return err
+		return nil, fmt.Errorf("rooms: %w", err)
 	}
-	return json.Unmarshal(raw, out)
+
+	npcs, err := loadJSON[map[string]NPC](npcsPath)
+	if err != nil {
+		return nil, fmt.Errorf("npcs: %w", err)
+	}
+
+	facts, err := loadJSON[map[string][]Fact](factsPath)
+	if err != nil {
+		return nil, fmt.Errorf("facts: %w", err)
+	}
+
+	return &World{Rooms: rooms, NPCs: npcs, Facts: facts}, nil
 }
 
-// NPCStub is the client-visible, trimmed-down view of an NPC: enough to
-// render a label and a body, nothing about what it knows.
+func loadJSON[T any](path string) (T, error) {
+	var zero T
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return zero, err
+	}
+	var out T
+	if err := json.Unmarshal(data, &out); err != nil {
+		return zero, err
+	}
+	return out, nil
+}
+
+// ChunkData is what gets sent to the client when entering a room.
+// Note: facts are deliberately excluded — they are sent strictly on demand
+// via npc_talk to enforce the ≤10% client cache limit.
+type ChunkData struct {
+	Room      Room       `json:"room"`
+	NPCs      []NPCStub  `json:"npcs"`
+	Neighbors []RoomStub `json:"neighbors"`
+}
+
+// RoomStub gives neighboring rooms' bounds for client-side wall collision
+// without leaking their NPCs or facts.
+type RoomStub struct {
+	ID       string `json:"id"`
+	Name     string `json:"name"`
+	Position Vec3   `json:"position"`
+	Size     Size   `json:"size"`
+}
+
 type NPCStub struct {
 	ID       string `json:"id"`
 	Name     string `json:"name"`
@@ -115,28 +132,7 @@ type NPCStub struct {
 	Model    string `json:"model,omitempty"`
 }
 
-// RoomStub is the minimal shape of a *neighbouring* room: just enough for
-// the client to know where a connected room sits and how big it is, so it
-// can open a doorway-shaped gap in the collision and auto-load that room
-// when the player walks into it. No NPCs, no facts — a neighbour is a
-// signpost, not room content.
-type RoomStub struct {
-	ID       string `json:"id"`
-	Name     string `json:"name"`
-	Position Vec3   `json:"position"`
-	Size     Size3  `json:"size"`
-}
-
-// ChunkData is exactly what gets sent to a client for one room. This is the
-// unit of client-side caching: a client holds at most its current room (+
-// its immediate neighbours' footprints), never the rest of the station and
-// never any Facts.
-type ChunkData struct {
-	Room      Room       `json:"room"`
-	NPCs      []NPCStub  `json:"npcs"`
-	Neighbors []RoomStub `json:"neighbors"`
-}
-
+// Chunk returns the minimal data needed to render roomID and talk to its NPC.
 func (w *World) Chunk(roomID string) (*ChunkData, bool) {
 	room, ok := w.Rooms[roomID]
 	if !ok {
@@ -144,9 +140,15 @@ func (w *World) Chunk(roomID string) (*ChunkData, bool) {
 	}
 
 	var npcs []NPCStub
-	for _, n := range w.NPCs {
-		if n.RoomID == roomID {
-			npcs = append(npcs, NPCStub{ID: n.ID, Name: n.Name, Title: n.Title, Position: n.Position, Model: n.Model})
+	for _, npc := range w.NPCs {
+		if npc.RoomID == roomID {
+			npcs = append(npcs, NPCStub{
+				ID:       npc.ID,
+				Name:     npc.Name,
+				Title:    npc.Title,
+				Position: npc.Position,
+				Model:    npc.Model,
+			})
 		}
 	}
 
@@ -169,27 +171,27 @@ func (w *World) Chunk(roomID string) (*ChunkData, bool) {
 // TopicKeywords maps Russian keywords the player might type to fact topic IDs.
 // Simple substring matching — no ML, works offline, fast.
 var TopicKeywords = map[string][]string{
-	"stars":      {"звезд", "солнц", "полярн", "светил", "светит"},
+	"stars":      {"звезд", "звёзд", "солнц", "полярн", "светил"},
 	"blackholes": {"чёрн", "черн", "дыр", "горизонт событ", "сингуляр"},
 	"galaxies":   {"галакти", "млечн", "путь", "андромед"},
-	"cosmology":  {"вселен", "расшир", "хаббл", "большой взрыв", "big bang"},
-	"gravity":    {"гравит", "невесом", "притяжен", "падени", "падает", "вес"},
-	"newton":     {"ньютон", "закон", "сила", "инерц"},
-	"inertia":    {"инерц", "движен", "остановит", "летит"},
-	"spin":       {"вращен", "крутит", "момент импульс", "закрутит"},
-	"rockets":    {"ракет", "двигател", "реактив", "топлив", "запуск"},
-	"history":    {"истори", "гагарин", "спутник", "первый", "1957", "1961", "космонавт"},
-	"staging":    {"ступен", "многоступ", "сброс", "баки"},
-	"reuse":      {"повторн", "многоразов", "посадк", "возврат"},
-	"body":       {"тело", "лицо", "отёк", "отек", "кост", "мышц"},
-	"plants":     {"растен", "оранжере", "салат", "выращив"},
-	"food":       {"еда", "еду", "пищ", "тюбик", "крошк", "паковал"},
-	"growth":     {"рост", "подраст", "позвоноч", "сантиметр"},
-	"adaptation": {"адаптац", "привык", "первые дни", "укачив", "болезн"},
-	"radiation":  {"радиац", "облучен", "излучен"},
-	"sleep":      {"сон", "спать", "сутки", "расписан", "восход", "закат"},
-	"return":     {"возвращ", "реабилитац", "после полёт", "после полет", "земл"},
-	"psychology": {"психолог", "изоляц", "совместим", "характер", "экипаж"},
+	"cosmology":  {"вселен", "расширен", "хаббл", "большой взрыв", "big bang"},
+	"gravity":    {"гравит", "невесом", "притяжен"},
+	"newton":     {"ньютон", "третий закон"},
+	"inertia":    {"инерц"},
+	"spin":       {"вращен", "момент импульс", "закрутит"},
+	"rockets":    {"ракет", "реактивн", "дюз"},
+	"history":    {"гагарин", "спутник-1", "спутник 1", "первый космонавт", "1957", "1961"},
+	"staging":    {"ступен", "многоступ", "сброс бак"},
+	"reuse":      {"многоразов", "посадк ракет", "возврат ракет"},
+	"body":       {"тело в космосе", "лицо", "отёк", "отек", "кости в космосе", "мышцы в космосе"},
+	"plants":     {"растен", "оранжере", "гидропоник", "выращив"},
+	"food":       {"тюбик", "сублимат", "космическ ед", "еда космонавт", "крошк"},
+	"growth":     {"позвоноч", "подраст", "вырасти в космосе", "рост в невесом"},
+	"adaptation": {"адаптац", "болезнь движения", "укачив"},
+	"radiation":  {"радиац", "облучен"},
+	"sleep":      {"сон в космосе", "спать в космосе", "режим сна", "сутки на орбит"},
+	"return":     {"реабилитац", "возвращен на земл", "после полёт", "после полет"},
+	"psychology": {"психолог", "изоляц", "экипаж"},
 }
 
 // matchTopics extracts topic IDs from a player's message by simple keyword
@@ -210,19 +212,53 @@ func matchTopics(message string) []string {
 	return matched
 }
 
-// PickFact selects the best fact for an NPC to tell this player, considering:
-//  1. If the player's message matches a topic keyword → pick an untold fact
-//     from that topic first.
-//  2. If the matched topic's facts are all told → repeat the most relevant one.
-//  3. If no topic matched → pick the next untold fact in order.
-//  4. If everything's been told → repeat the last fact.
+// isGeneralFactRequest checks if the player explicitly asked for a fact or general space info
+func isGeneralFactRequest(message string) bool {
+	lower := strings.ToLower(strings.TrimSpace(message))
+	triggers := []string{
+		"расскажи что-нибудь",
+		"расскажи что нибудь",
+		"расскажи что-то",
+		"расскажи что то",
+		"расскажи факт",
+		"какой-нибудь факт",
+		"какой нибудь факт",
+		"что интересного",
+		"что знаешь",
+		"поделись фактом",
+		"интересный факт",
+		"удиви меня",
+		"о космосе",
+		"про космос",
+		"ещё факт",
+		"еще факт",
+		"следующий факт",
+	}
+	for _, t := range triggers {
+		if strings.Contains(lower, t) {
+			return true
+		}
+	}
+	return false
+}
+
+// PickFact selects the best fact for an NPC to tell this player.
+// It returns a fact ONLY if:
+//  1. The player's question matches a topic that THIS NPC specializes in.
+//  2. The player explicitly asks to tell a fact or something interesting.
 //
-// Returns the chosen fact, whether it's a repeat, and a list of topics that
-// still have untold facts (so the NPC can suggest what to ask about).
+// If the player asks small-talk ("как дела?") or an off-topic question ("как испечь блинчики?"),
+// it returns fact = nil so the NPC can respond conversationally or decline off-topic.
 func (w *World) PickFact(npcID string, message string, told map[string]bool) (fact *Fact, isRepeat bool, availableTopics []string) {
 	bank := w.Facts[npcID]
 	if len(bank) == 0 {
 		return nil, false, nil
+	}
+
+	// Topics of THIS NPC
+	npcTopics := map[string]bool{}
+	for _, f := range bank {
+		npcTopics[f.Topic] = true
 	}
 
 	// Collect topics that still have untold facts for this NPC
@@ -239,8 +275,16 @@ func (w *World) PickFact(npcID string, message string, told map[string]bool) (fa
 	// Try to match player's question to a topic
 	matchedTopics := matchTopics(message)
 
-	// 1. Topic-matched untold fact
-	for _, topic := range matchedTopics {
+	// Keep only topics this NPC actually specializes in
+	var relevantTopics []string
+	for _, t := range matchedTopics {
+		if npcTopics[t] {
+			relevantTopics = append(relevantTopics, t)
+		}
+	}
+
+	// 1. Topic-matched untold fact for this NPC
+	for _, topic := range relevantTopics {
 		for i := range bank {
 			if bank[i].Topic == topic && !told[bank[i].ID] {
 				return &bank[i], false, availableTopics
@@ -249,7 +293,7 @@ func (w *World) PickFact(npcID string, message string, told map[string]bool) (fa
 	}
 
 	// 2. Topic-matched but already told (repeat, but relevant to the question)
-	for _, topic := range matchedTopics {
+	for _, topic := range relevantTopics {
 		for i := range bank {
 			if bank[i].Topic == topic {
 				return &bank[i], true, availableTopics
@@ -257,13 +301,18 @@ func (w *World) PickFact(npcID string, message string, told map[string]bool) (fa
 		}
 	}
 
-	// 3. No topic match — next untold fact in order
-	for i := range bank {
-		if !told[bank[i].ID] {
-			return &bank[i], false, availableTopics
+	// 3. Explicit request for a general fact
+	if isGeneralFactRequest(message) {
+		for i := range bank {
+			if !told[bank[i].ID] {
+				return &bank[i], false, availableTopics
+			}
 		}
+		// All told — repeat last fact
+		return &bank[len(bank)-1], true, availableTopics
 	}
 
-	// 4. Everything told — repeat last
-	return &bank[len(bank)-1], true, availableTopics
+	// 4. Neither topic match nor general fact request:
+	// Return nil so the NPC can answer small talk or decline off-topic questions.
+	return nil, false, availableTopics
 }

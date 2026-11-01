@@ -1,17 +1,9 @@
 // Package ai turns a raw fact into an in-character NPC line using a finite
 // state machine (FSM) with keyword-aware topic selection. If a local Ollama
 // server is configured and answers in time, it rephrases the fact in the
-// NPC's voice. Otherwise (no Ollama URL, Ollama unreachable, or slow) it
-// falls back to a templated FSM line — this keeps the game fully playable
-// with zero network access, which is required during the offline demo.
-//
-// FSM states per (player, NPC) pair:
-//
-//	GREETING  → first interaction, NPC introduces itself
-//	TELLING   → NPC tells facts, adapting to player's questions via keywords
-//	DEEPDIVE  → player asked about a topic NPC already covered → NPC repeats
-//	            with a "remember?" prefix and suggests other topics
-//	EXHAUSTED → all facts told → NPC says goodbye and suggests other NPCs
+// NPC's voice or handles conversation and off-topic questions in character.
+// Otherwise (no Ollama URL, Ollama unreachable, or slow) it falls back to
+// templated FSM lines.
 package ai
 
 import (
@@ -108,8 +100,24 @@ func (r *Responder) setState(playerID, npcID string, s State) {
 }
 
 // ---------------------------------------------------------------------------
-// NPC greeting templates (one per NPC, adds personality to first contact)
+// NPC specialties and greeting templates
 // ---------------------------------------------------------------------------
+
+var npcSpecialties = map[string]string{
+	"losyash": "астрофизика: звёзды, чёрные дыры, галактики, Вселенная",
+	"krosh":   "физика и движение: гравитация, невесомость, законы Ньютона, инерция, вращение",
+	"pin":     "инженерия и техника: ракеты, двигатели, ступени, космическая техника, Гагарин и первый спутник",
+	"nyusha":  "космическая биология: растения в оранжерее, питание космонавтов, изменения тела в невесомости",
+	"karich":  "космическая медицина: адаптация к невесомости, радиация, сон, психология экипажа, реабилитация",
+}
+
+var npcOfftopicFallbacks = map[string]string{
+	"losyash": "Друг мой любезный, я же учёный-астрофизик на космической станции! Земной быт, кулинария и подобные темы меня мало занимают. Давайте лучше обсудим звёзды, чёрные дыры или тайны Вселенной!",
+	"krosh":   "Ёлки-иголки, какие ещё посторонние темы? Мы же на космической станции в невесомости летаем! Спроси лучше, как тут кувыркаться или как работают законы физики!",
+	"pin":     "О, найн! Это космическая станция 'Шаролёт', а я главный инженер! Никаких отвлечённых разговоров, я работаю с реактивными двигателями и ракетами! Спрашивай по делу!",
+	"nyusha":  "Ой, ну это совсем не ко мне! Я вообще-то занимаюсь космической биологией и оранжереей на станции. Спроси меня лучше про растения на орбите или про то, как тело меняется в космосе!",
+	"karich":  "Голубчик мой, оставьте эти земные хлопоты на Земле! На станции я слежу за здоровьем и адаптацией экипажа. Давайте поговорим о самочувствии космонавтов в полете.",
+}
 
 var greetings = map[string]string{
 	"losyash": "О, приветствую! Я Лосяш, астрофизик этой станции. Обожаю звёзды, чёрные дыры и всё, что связано с космосом! Спрашивай — расскажу!",
@@ -120,9 +128,7 @@ var greetings = map[string]string{
 	"karich":  "Приветствую, юный исследователь. Я Кар-Карыч. В космосе много тайн, и я готов поделиться своим богатым жизненным опытом!",
 }
 
-// Reply returns the line an NPC says. It drives the FSM through states:
-// GREETING → TELLING → DEEPDIVE/EXHAUSTED. Uses PickFact from world
-// package for keyword-aware topic selection.
+// Reply returns the line an NPC says.
 func (r *Responder) Reply(ctx context.Context, npc world.NPC, fact *world.Fact, playerMessage string, repeat bool, availableTopics []string, playerID string) string {
 	state := r.getState(playerID, npc.ID)
 
@@ -138,25 +144,20 @@ func (r *Responder) Reply(ctx context.Context, npc world.NPC, fact *world.Fact, 
 		}
 	}
 
-	if state == Exhausted {
+	if state == Exhausted && fact != nil {
 		return "Кажется, я рассказал тебе всё, что знаю! Попробуй поговорить с кем-нибудь в другом отсеке станции."
-	}
-
-	// States: Telling or DeepDive
-	if fact == nil {
-		r.setState(playerID, npc.ID, Exhausted)
-		return "Хм, кажется, я рассказал тебе всё, что знаю по этой теме! Загляни в другие отсеки — там тоже много интересного."
 	}
 
 	if repeat {
 		r.setState(playerID, npc.ID, DeepDive)
-	} else {
+	} else if fact != nil {
 		r.setState(playerID, npc.ID, Telling)
 	}
 
 	// Try Ollama first if available
 	if r.ollamaURL != "" {
-		log.Printf("ai: запрос к Ollama для %s по теме %q (вопрос: %q)", npc.Name, fact.Topic, playerMessage)
+		hasFact := fact != nil
+		log.Printf("ai: запрос к Ollama для %s (hasFact: %v, вопрос: %q)", npc.Name, hasFact, playerMessage)
 		text, err := r.askOllama(ctx, npc, fact, playerMessage, repeat, availableTopics)
 		if err != nil {
 			log.Printf("ai: ollama error for %s→%s, falling back to FSM: %v", playerID, npc.ID, err)
@@ -166,12 +167,19 @@ func (r *Responder) Reply(ctx context.Context, npc world.NPC, fact *world.Fact, 
 		}
 	}
 
-	// FSM fallback: templated response (client already displays speaker name in chat bubble)
-	return fsmLine(npc, fact, repeat, availableTopics)
+	// FSM fallback:
+	if fact != nil {
+		return fsmLine(npc, fact, repeat, availableTopics)
+	}
+
+	// Fallback for off-topic or small-talk when no fact was requested
+	if fallback, ok := npcOfftopicFallbacks[npc.ID]; ok {
+		return fallback
+	}
+	return fmt.Sprintf("Я — %s, %s. Давай лучше поговорим о космосе!", npc.Name, npc.Title)
 }
 
-// fsmLine generates a templated NPC response without LLM.
-// Note: we do not prefix with npc.Name because the client UI already shows it.
+// fsmLine generates a templated NPC response without LLM when a fact is present.
 func fsmLine(npc world.NPC, fact *world.Fact, repeat bool, availableTopics []string) string {
 	var sb strings.Builder
 
@@ -273,32 +281,67 @@ func (r *Responder) askOllama(ctx context.Context, npc world.NPC, fact *world.Fa
 	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
 
-	repeatInstruction := ""
-	if repeat {
-		repeatInstruction = "Игрок уже слышал этот факт раньше — перефразируй его и заметь, что ты это уже рассказывал. "
+	specialty := npcSpecialties[npc.ID]
+	if specialty == "" {
+		specialty = npc.Title
 	}
 
-	topicHint := ""
-	if len(availableTopics) > 0 {
-		var names []string
-		for _, t := range availableTopics {
-			names = append(names, topicDisplayName(t))
+	var prompt string
+
+	if fact != nil {
+		// Scenario A: explaining a specific scientific fact
+		repeatInstruction := ""
+		if repeat {
+			repeatInstruction = "Игрок уже слышал этот факт раньше — заметь в начале реплики, что ты это уже упоминал.\n"
 		}
-		topicHint = fmt.Sprintf("Если уместно, в конце можешь предложить поговорить ещё про: %s. ", strings.Join(names, ", "))
-	}
 
-	prompt := fmt.Sprintf(
-		"Ты — %s, %s на космической станции «Шаролёт». Твой характер: %s. "+
-			"Игрок говорит тебе: «%s». "+
-			"%s"+
-			"Ответь по-русски двумя-тремя короткими предложениями в своём стиле и обязательно передай этот научный факт: «%s». "+
-			"%s"+
-			"Не называй своё имя в начале реплики. Не упоминай, что ты ИИ, бот или персонаж мультфильма. Не используй маркдаун.",
-		npc.Name, npc.Title, npc.Personality, playerMessage,
-		repeatInstruction,
-		fact.Text,
-		topicHint,
-	)
+		topicHint := ""
+		if len(availableTopics) > 0 {
+			var names []string
+			for _, t := range availableTopics {
+				names = append(names, topicDisplayName(t))
+			}
+			topicHint = fmt.Sprintf("Если уместно, в конце можешь предложить поговорить ещё про: %s.\n", strings.Join(names, ", "))
+		}
+
+		prompt = fmt.Sprintf(
+			"Ты — %s, %s на космической станции «Шаролёт». Твой характер: %s. Твоя специальность: %s.\n"+
+				"Игрок спрашивает: «%s».\n"+
+				"%s"+
+				"Ответь по-русски двумя-тремя короткими предложениями в своём стиле и характере, объяснив этот научный факт: «%s».\n"+
+				"%s\n"+
+				"ПРАВИЛА:\n"+
+				"- Не называй своё имя в начале реплики.\n"+
+				"- Не говори, что ты ИИ, бот или персонаж мультфильма.\n"+
+				"- Не используй маркдаун.\n"+
+				"- Отвечай живо, кратко и строго в своём характере.",
+			npc.Name, npc.Title, npc.Personality, specialty,
+			playerMessage,
+			repeatInstruction,
+			fact.Text,
+			topicHint,
+		)
+	} else {
+		// Scenario B: small-talk OR off-topic question without a science fact request
+		prompt = fmt.Sprintf(
+			"Ты — %s, %s на космической станции «Шаролёт».\n"+
+				"Твой характер: %s.\n"+
+				"Твоя научная специальность на станции: %s.\n"+
+				"Игрок говорит тебе: «%s».\n\n"+
+				"ПРАВИЛА ОТВЕТА:\n"+
+				"1. Если вопрос игрока на отвлечённую или постороннюю тему (кулинарные рецепты вроде блинчиков, земная бытовая жизнь, не связанная с космосом история, программирование, другие темы не про станцию и космос) — ВЕЖЛИВО, НО ТВЁРДО И С ХАРАКТЕРНЫМ ЮМОРОМ В СВОЁМ СТИЛЕ ОТКАЖИСЬ отвечать. Скажи, что ты на космической станции занимаешься наукой (%s), а не бытовыми вопросами, и предложи поговорить о твоей специальности.\n"+
+				"2. Если игрок просто общается («как дела?», «чем занят?», «кто ты?») — ответь в своём характере, расскажи кратко, чем занят на станции, и предложи задать вопрос по твоей теме (%s).\n"+
+				"3. НЕ придумывай случайных научных фактов, если о них прямо не спрашивали!\n"+
+				"4. Не называй своё имя в начале реплики. Не говори, что ты ИИ, языковая модель или персонаж мультфильма.\n"+
+				"5. Ответ должен быть кратким: 2-3 живых предложения на русском языке. Без маркдауна.",
+			npc.Name, npc.Title,
+			npc.Personality,
+			specialty,
+			playerMessage,
+			specialty,
+			specialty,
+		)
+	}
 
 	body, err := json.Marshal(ollamaRequest{Model: r.model, Prompt: prompt, Stream: false})
 	if err != nil {
