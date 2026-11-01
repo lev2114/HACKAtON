@@ -1,78 +1,329 @@
 {
   "hub": {
     "id": "hub",
-    "name": "Стыковочный узел",
+    "name": "Центральный вестибюль",
     "position": { "x": 0, "y": 0, "z": 0 },
-    "size": { "w": 20, "h": 9, "d": 20 },
+    "size": {
+      "w": 26.4,
+      "h": 9,
+      "d": 26.4
+    },
     "color": "#6b7280",
-    "npcId": null,
-    "connectsTo": ["room_rockets", "room_medbay"],
-    "model": "/models/starling-hub.glb",
+    "npcId": "krosh",
+    "connectsTo": [
+      "room_medbay",
+      "room_rockets",
+      "room_greenhouse",
+      "room_chemistry",
+      "room_radio",
+      "room_stars",
+      "room_library",
+      "room_gravity",
+      "room_dining"
+    ],
+    "model": "/models/starling-lobby-9-doors.glb",
     "modelScale": 1,
-    "radius": 10,
-    "spawn": { "x": 0, "y": 1.6, "z": 0 },
+    "radius": 13.2,
+    "spawn": { "x": 0, "y": 1.655, "z": 3 },
     "doors": [
-      { "room": "room_medbay", "position": { "x": -9.070031, "y": 0.06, "z": -3.711406 }, "halfWidth": 1, "modelDoor": "MEDICAL" },
-      { "room": "room_rockets", "position": { "x": -5.471776, "y": 0.06, "z": -8.13017 }, "halfWidth": 1, "modelDoor": "MECHANICAL" }
-    ]
+      {
+        "room": "room_medbay",
+        "position": { "x": -11.837211, "y": 0.06, "z": -5.84127 },
+        "halfWidth": 1,
+        "modelDoor": "Medbay"
+      },
+      {
+        "room": "room_rockets",
+        "position": { "x": -9.778591, "y": 0.06, "z": -8.866745 },
+        "halfWidth": 1,
+        "modelDoor": "Mechanical Bay"
+      },
+      {
+        "room": "room_greenhouse",
+        "position": { "x": -6.968425, "y": 0.06, "z": -11.210756 },
+        "halfWidth": 1,
+        "modelDoor": "Bio Lab"
+      },
+      {
+        "room": "room_chemistry",
+        "position": { "x": -3.622693, "y": 0.06, "z": -12.693152 },
+        "halfWidth": 1,
+        "modelDoor": "Chem Lab"
+      },
+      {
+        "room": "room_radio",
+        "position": { "x": 0.001465, "y": 0.06, "z": -13.2 },
+        "halfWidth": 1,
+        "modelDoor": "Radio Room"
+      },
+      {
+        "room": "room_stars",
+        "position": { "x": 3.625511, "y": 0.06, "z": -12.692347 },
+        "halfWidth": 1,
+        "modelDoor": "Planetarium"
+      },
+      {
+        "room": "room_library",
+        "position": { "x": 6.970914, "y": 0.06, "z": -11.209209 },
+        "halfWidth": 1,
+        "modelDoor": "Library"
+      },
+      {
+        "room": "room_gravity",
+        "position": { "x": 9.780559, "y": 0.06, "z": -8.864574 },
+        "halfWidth": 1,
+        "modelDoor": "Spacesuit Room"
+      },
+      {
+        "room": "room_dining",
+        "position": { "x": 11.838508, "y": 0.06, "z": -5.838641 },
+        "halfWidth": 1,
+        "modelDoor": "Cafeteria"
+      }
+    ],
+    "collision": "walkmesh"
   },
   "room_stars": {
     "id": "room_stars",
     "name": "Обсерватория",
     "position": { "x": 0, "y": 0, "z": -21 },
-    "size": { "w": 12, "h": 6, "d": 12 },
+    "size": {
+      "w": 14.4,
+      "h": 6,
+      "d": 14.4
+    },
     "color": "#1e2a5e",
     "npcId": "losyash",
-    "connectsTo": ["hub"]
+    "connectsTo": [
+      "hub"
+    ],
+    "model": "/models/starling-observatory.glb",
+    "modelScale": 1,
+    "radius": 7.2,
+    "spawn": { "x": 0, "y": 1.655, "z": -4.8 },
+    "doors": [
+      {
+        "room": "hub",
+        "position": { "x": 0, "y": 0.06, "z": -7.13 },
+        "halfWidth": 1.1
+      }
+    ],
+    "collision": "walkmesh"
   },
   "room_gravity": {
     "id": "room_gravity",
-    "name": "Лаборатория гравитации",
+    "name": "Скафандровый отсек",
     "position": { "x": 20, "y": 0, "z": -6 },
-    "size": { "w": 12, "h": 6, "d": 12 },
+    "size": {
+      "w": 14.4,
+      "h": 6,
+      "d": 14.4
+    },
     "color": "#3a2e55",
-    "npcId": "krosh",
-    "connectsTo": ["hub"]
+    "npcId": "nyusha",
+    "connectsTo": [
+      "hub"
+    ],
+    "model": "/models/starling-suit-room.glb",
+    "modelScale": 1,
+    "radius": 7.2,
+    "spawn": { "x": 0, "y": 1.655, "z": -4.8 },
+    "doors": [
+      {
+        "room": "hub",
+        "position": { "x": 0, "y": 0.06, "z": -7.13 },
+        "halfWidth": 1.1
+      }
+    ],
+    "collision": "walkmesh"
   },
   "room_rockets": {
     "id": "room_rockets",
-    "name": "Двигательный отсек",
+    "name": "Механический отсек",
     "position": { "x": -20, "y": 0, "z": -28 },
-    "size": { "w": 14.4, "h": 6, "d": 14.4 },
+    "size": {
+      "w": 14.4,
+      "h": 6,
+      "d": 14.4
+    },
     "color": "#5e2a1e",
     "npcId": "pin",
-    "connectsTo": ["hub"],
+    "connectsTo": [
+      "hub"
+    ],
     "model": "/models/starling-mechanical.glb",
     "modelScale": 1,
     "radius": 7.2,
-    "spawn": { "x": 0, "y": 1.6, "z": -4.8 },
+    "spawn": { "x": 0, "y": 1.655, "z": -4.8 },
     "doors": [
-      { "room": "hub", "position": { "x": 0, "y": 0.06, "z": -7.13 }, "halfWidth": 1.1 }
-    ]
+      {
+        "room": "hub",
+        "position": { "x": 0, "y": 0.06, "z": -7.13 },
+        "halfWidth": 1.1
+      }
+    ],
+    "collision": "walkmesh"
   },
   "room_greenhouse": {
     "id": "room_greenhouse",
-    "name": "Оранжерея",
+    "name": "Биологическая лаборатория",
     "position": { "x": -13, "y": 0, "z": 17 },
-    "size": { "w": 12, "h": 6, "d": 12 },
+    "size": {
+      "w": 14.4,
+      "h": 6,
+      "d": 14.4
+    },
     "color": "#1e5e2a",
-    "npcId": "nyusha",
-    "connectsTo": ["hub"]
+    "npcId": "kopatych",
+    "connectsTo": [
+      "hub"
+    ],
+    "model": "/models/starling-bio-lab.glb",
+    "modelScale": 1,
+    "radius": 7.2,
+    "spawn": { "x": 0, "y": 1.655, "z": -4.8 },
+    "doors": [
+      {
+        "room": "hub",
+        "position": { "x": 0, "y": 0.06, "z": -7.13 },
+        "halfWidth": 1.1
+      }
+    ],
+    "collision": "walkmesh"
   },
   "room_medbay": {
     "id": "room_medbay",
     "name": "Медблок",
     "position": { "x": -30, "y": 0, "z": -10 },
-    "size": { "w": 14.4, "h": 6, "d": 14.4 },
+    "size": {
+      "w": 14.4,
+      "h": 6,
+      "d": 14.4
+    },
     "color": "#5e1e4a",
-    "npcId": "karich",
-    "connectsTo": ["hub"],
+    "npcId": "sovunya",
+    "connectsTo": [
+      "hub"
+    ],
     "model": "/models/starling-medbay.glb",
     "modelScale": 1,
     "radius": 7.2,
-    "spawn": { "x": 0, "y": 1.6, "z": -4.8 },
+    "spawn": { "x": 0, "y": 1.655, "z": -4.8 },
     "doors": [
-      { "room": "hub", "position": { "x": 0, "y": 0.06, "z": -7.13 }, "halfWidth": 1.1 }
-    ]
+      {
+        "room": "hub",
+        "position": { "x": 0, "y": 0.06, "z": -7.13 },
+        "halfWidth": 1.1
+      }
+    ],
+    "collision": "walkmesh"
+  },
+  "room_chemistry": {
+    "id": "room_chemistry",
+    "name": "Химическая лаборатория",
+    "position": { "x": -21.956, "y": 0, "z": -76.928 },
+    "size": {
+      "w": 14.4,
+      "h": 6,
+      "d": 14.4
+    },
+    "color": "#35616d",
+    "npcId": "losyash_chemistry",
+    "connectsTo": [
+      "hub"
+    ],
+    "model": "/models/starling-chemical-lab.glb",
+    "modelScale": 1,
+    "radius": 7.2,
+    "spawn": { "x": 0, "y": 1.655, "z": -4.8 },
+    "doors": [
+      {
+        "room": "hub",
+        "position": { "x": 0, "y": 0.06, "z": -7.13 },
+        "halfWidth": 1.1
+      }
+    ],
+    "collision": "walkmesh"
+  },
+  "room_radio": {
+    "id": "room_radio",
+    "name": "Радиорубка",
+    "position": { "x": 0.009, "y": 0, "z": -80 },
+    "size": {
+      "w": 14.4,
+      "h": 6,
+      "d": 14.4
+    },
+    "color": "#35616d",
+    "npcId": "karich",
+    "connectsTo": [
+      "hub"
+    ],
+    "model": "/models/starling-radio-room.glb",
+    "modelScale": 1,
+    "radius": 7.2,
+    "spawn": { "x": 0, "y": 1.655, "z": -4.8 },
+    "doors": [
+      {
+        "room": "hub",
+        "position": { "x": 0, "y": 0.06, "z": -7.13 },
+        "halfWidth": 1.1
+      }
+    ],
+    "collision": "walkmesh"
+  },
+  "room_library": {
+    "id": "room_library",
+    "name": "Библиотека",
+    "position": { "x": 42.248, "y": 0, "z": -67.935 },
+    "size": {
+      "w": 14.4,
+      "h": 6,
+      "d": 14.4
+    },
+    "color": "#35616d",
+    "npcId": "yozhik",
+    "connectsTo": [
+      "hub"
+    ],
+    "model": "/models/starling-library.glb",
+    "modelScale": 1,
+    "radius": 7.2,
+    "spawn": { "x": 0, "y": 1.655, "z": -4.8 },
+    "doors": [
+      {
+        "room": "hub",
+        "position": { "x": 0, "y": 0.06, "z": -7.13 },
+        "halfWidth": 1.1
+      }
+    ],
+    "collision": "walkmesh"
+  },
+  "room_dining": {
+    "id": "room_dining",
+    "name": "Столовая",
+    "position": { "x": 71.749, "y": 0, "z": -35.386 },
+    "size": {
+      "w": 14.4,
+      "h": 6,
+      "d": 14.4
+    },
+    "color": "#35616d",
+    "npcId": "sovunya_dining",
+    "connectsTo": [
+      "hub"
+    ],
+    "model": "/models/starling-dining-room.glb",
+    "modelScale": 1,
+    "radius": 7.2,
+    "spawn": { "x": 0, "y": 1.655, "z": -4.8 },
+    "doors": [
+      {
+        "room": "hub",
+        "position": { "x": 0, "y": 0.06, "z": -7.13 },
+        "halfWidth": 1.1
+      }
+    ],
+    "collision": "walkmesh"
   }
 }

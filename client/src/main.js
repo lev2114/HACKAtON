@@ -34,6 +34,8 @@ window.addEventListener("resize", () => {
 const players = new Map(); // playerId -> THREE.Mesh
 window.__sharolet.players = players; // для отладки/автотестов, см. строку 18
 let currentRoomBuilt = null;
+let roomCleanup = Promise.resolve();
+let roomVersion = 0;
 let myId = null;
 let myName = null;
 let disconnected = false;
@@ -42,10 +44,12 @@ const hud = document.getElementById("hud");
 const chatBox = document.getElementById("chat");
 
 function updateHud() {
-  if (!currentRoomBuilt) return;
   hud.textContent = disconnected
     ? "Соединение потеряно. Проверь сервер и обнови страницу."
-    : `${myName} · ${currentRoomBuilt.room.name} · Игроков в комнате: ${players.size + 1}`;
+    : !currentRoomBuilt ? "Переход в следующий отсек…"
+    : currentRoomBuilt.error || (!currentRoomBuilt.ready
+      ? `Загрузка: ${currentRoomBuilt.room.name}…`
+      : `${myName} · ${currentRoomBuilt.room.name} · Игроков в комнате: ${players.size + 1}`);
 }
 
 function showChat(name, text) {
@@ -79,10 +83,14 @@ function removePlayerMesh(id) {
 
 // On transitions, place the player just inside the matching return doorway
 // (computeEntryPoint). roster — те, кто уже стоит в комнате, см. ниже.
-function enterChunk(chunk, teleport, roster) {
-  destroyRoom(scene, currentRoomBuilt);
+async function enterChunk(chunk, teleport, roster) {
+  const version = ++roomVersion;
+  const previous = currentRoomBuilt;
+  currentRoomBuilt = null;
+  // Serialize cleanup, including any GLB parse still in flight. The next
+  // room cannot start downloading until the previous one's resources are gone.
+  roomCleanup = roomCleanup.then(() => destroyRoom(scene, previous));
   for (const id of [...players.keys()]) removePlayerMesh(id);
-  currentRoomBuilt = buildRoom(scene, chunk);
   if (teleport) {
     camera.position.set(teleport.x, teleport.y ?? 1.6, teleport.z);
     if (teleport.yaw !== undefined) {
@@ -99,6 +107,11 @@ function enterChunk(chunk, teleport, roster) {
     if (p.playerId === myId) continue;
     spawnPlayerMesh(p.playerId, p.x, p.y, p.z);
   }
+  updateHud();
+  await roomCleanup;
+  if (version !== roomVersion) return;
+  renderer.renderLists.dispose();
+  currentRoomBuilt = buildRoom(scene, chunk);
   updateHud();
 }
 
@@ -249,7 +262,8 @@ function isInDoorway(room, neighbors, x, z) {
   return false;
 }
 
-function isAtDoor(room, door, x, z) {
+function isAtDoor(room, door, x, z, y = camera.position.y) {
+  if (Math.abs(y - (room.position.y + door.position.y + 1.6)) > 0.6) return false;
   const { x: dx, z: dz } = door.position;
   const length = Math.hypot(dx, dz) || 1;
   const relX = x - room.position.x;
@@ -295,7 +309,7 @@ function computeEntryPoint(newRoom, fromRoom) {
     const inset = 1.4;
     return {
       x: newRoom.position.x + x - (x / length) * inset,
-      y: newRoom.position.y + 1.6,
+      y: newRoom.position.y + door.position.y + 1.6,
       z: newRoom.position.z + z - (z / length) * inset,
       yaw: Math.atan2(x, z),
     };
@@ -328,7 +342,7 @@ let fromRoomForTransition = null;
 // до центра соседней комнаты) — раньше между "прошёл через проём" и
 // "комната реально сменилась" была добрая пара секунд ходьбы в пустоте.
 function maybeAutoEnterNeighbor() {
-  if (!currentRoomBuilt || pendingRoomId) return;
+  if (!currentRoomBuilt?.ready || pendingRoomId || disconnected) return;
   const { room, neighbors } = currentRoomBuilt;
   if (room.doors) {
     const door = room.doors.find((entry) => {
@@ -359,7 +373,7 @@ const clock = new THREE.Clock();
 let lastSentAt = 0;
 
 function tick() {
-  const dt = clock.getDelta();
+  const dt = Math.min(clock.getDelta(), 0.05);
   camera.rotation.y = yaw;
   camera.rotation.x = pitch;
 
@@ -372,15 +386,17 @@ function tick() {
   if (keys["KeyA"]) move.sub(right);
   if (move.lengthSq() > 0) {
     move.normalize().multiplyScalar(speed * dt);
-    camera.position.add(move);
   }
 
-  if (currentRoomBuilt) {
+  if (currentRoomBuilt?.ready && !pendingRoomId && !disconnected) {
+    if (currentRoomBuilt.collision) currentRoomBuilt.collision.move(camera.position, move);
+    else camera.position.add(move);
     const resolved = resolveCollision(currentRoomBuilt.room, currentRoomBuilt.neighbors, camera.position.x, camera.position.z);
     camera.position.x = resolved.x;
     camera.position.z = resolved.z;
     maybeAutoEnterNeighbor();
   }
+  updateHud();
 
   const now = performance.now();
   if (now - lastSentAt > 50) {

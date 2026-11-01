@@ -1,25 +1,25 @@
 // Строит/разбирает геометрию одной комнаты из chunk_data.
-// В сцене одна комната с NPC; загруженные GLB сохраняются в modelCache.
+// В памяти только текущая комната с NPC; при выходе освобождаем её GLB.
 // База фактов NPC остаётся на сервере.
 import * as THREE from "three";
 import { GLTFLoader } from "three/addons/loaders/GLTFLoader.js";
-import { clone as cloneModel } from "three/addons/utils/SkeletonUtils.js";
+import { createRoomCollision } from "./collision.js";
 
 const loader = new GLTFLoader();
-// url -> Promise<THREE.Object3D>: модель парсится один раз и переиспользуется
-// клонированием, а не перекачивается заново при каждом входе в комнату.
-const modelCache = new Map();
-
-function loadModel(url) {
-  if (!modelCache.has(url)) {
-    modelCache.set(
-      url,
-      new Promise((resolve, reject) => {
-        loader.load(url, (gltf) => resolve(gltf.scene), undefined, reject);
-      })
-    );
+async function loadModel(url, built) {
+  // No browser asset cache either: only the active room is retained.
+  const response = await fetch(url, { signal: built.controller.signal, cache: "no-store" });
+  if (!response.ok) throw new Error(`${url}: HTTP ${response.status}`);
+  const buffer = await response.arrayBuffer();
+  built.controller.signal.throwIfAborted();
+  const gltf = await loader.parseAsync(buffer, new URL(".", new URL(url, location.href)).href);
+  // Parsing cannot be aborted. A transition waits for this cleanup before
+  // fetching the next room, so even a late result cannot accumulate models.
+  if (built.disposed) {
+    disposeOwnedResources(gltf.scene);
+    throw new DOMException("Room unloaded", "AbortError");
   }
-  return modelCache.get(url);
+  return gltf.scene;
 }
 
 // Сгенерированные модели приходят в произвольном масштабе и со своим
@@ -52,6 +52,11 @@ export function buildRoom(scene, chunk) {
   const { room, npcs } = chunk;
   const group = new THREE.Group();
   group.name = `room:${room.id}`;
+  const built = {
+    group, npcMeshes: {}, room, neighbors: chunk.neighbors || [],
+    controller: new AbortController(), loads: [], disposed: false,
+    ready: !room.model, error: null, collision: null,
+  };
 
   // room.position — это абсолютные мировые координаты (как и у NPC ниже),
   // не локальный ноль группы: иначе стены/пол любой комнаты кроме той,
@@ -59,20 +64,19 @@ export function buildRoom(scene, chunk) {
   const { x: rx, y: ry, z: rz } = room.position;
 
   if (room.model) {
-    buildModelRoom(scene, group, room);
+    buildModelRoom(built);
   } else {
     buildProceduralRoom(group, room, rx, ry, rz, chunk.neighbors);
   }
 
-  const npcMeshes = {};
   for (const npc of npcs || []) {
-    npcMeshes[npc.id] = buildNpcEntity(scene, group, npc);
+    built.npcMeshes[npc.id] = buildNpcEntity(built, npc);
   }
 
   addDoorwayLight(group, room, chunk.neighbors);
 
   scene.add(group);
-  return { group, npcMeshes, room, neighbors: chunk.neighbors || [] };
+  return built;
 }
 
 // Обёртка-Group на npc.position держит стабильную .position (main.js меряет
@@ -80,11 +84,13 @@ export function buildRoom(scene, chunk) {
 // загрузиться 3D-модель — внутри неё либо сразу розовая сфера-заглушка
 // (нет npc.model), либо сфера на время загрузки модели, которая потом
 // подменяется так же, как модель комнаты (см. buildModelRoom).
-function buildNpcEntity(scene, roomGroup, npc) {
+function buildNpcEntity(built, npc) {
+  const roomGroup = built.group;
   const holder = new THREE.Group();
   holder.position.set(npc.position.x, npc.position.y, npc.position.z);
   holder.userData.npc = npc;
   roomGroup.add(holder);
+
 
   const placeholder = new THREE.Mesh(
     new THREE.SphereGeometry(0.8, 16, 16),
@@ -93,12 +99,8 @@ function buildNpcEntity(scene, roomGroup, npc) {
   holder.add(placeholder);
 
   if (npc.model) {
-    loadModel(npc.model)
-      .then((sceneRoot) => {
-        if (holder.parent !== roomGroup || roomGroup.parent !== scene) return; // уже вышли из комнаты
-
-        const instance = cloneModel(sceneRoot);
-        instance.userData.sharedModel = true;
+    built.loads.push(loadModel(npc.model, built)
+      .then((instance) => {
         fitNpcModel(instance, npc);
 
         holder.remove(placeholder);
@@ -106,7 +108,9 @@ function buildNpcEntity(scene, roomGroup, npc) {
         placeholder.material.dispose();
         holder.add(instance);
       })
-      .catch((err) => console.error(`не удалось загрузить модель NPC ${npc.id}:`, err));
+      .catch((err) => {
+        if (err.name !== "AbortError") console.error(`не удалось загрузить модель NPC ${npc.id}:`, err);
+      }));
   }
 
   return holder;
@@ -124,7 +128,7 @@ function fitNpcModel(root, npc) {
 
   const scale = NPC_TARGET_HEIGHT / (size.y || 1);
   root.scale.setScalar(scale);
-  root.position.set(-center.x * scale, -npc.position.y - box.min.y * scale, -center.z * scale);
+  root.position.set(-center.x * scale, -1 - box.min.y * scale, -center.z * scale);
 }
 
 // Ширина проёма — должна совпадать с DOOR_HALF_WIDTH в main.js (там же
@@ -212,7 +216,8 @@ function buildProceduralRoom(group, room, rx, ry, rz, neighbors) {
   group.add(ceiling);
 }
 
-function buildModelRoom(scene, group, room) {
+function buildModelRoom(built) {
+  const { group, room } = built;
   // Заглушка на время загрузки тяжёлой модели (десятки МБ), чтобы игрок не
   // стоял в пустоте, пока она качается и парсится.
   const placeholder = new THREE.Mesh(
@@ -223,24 +228,23 @@ function buildModelRoom(scene, group, room) {
   if (room.modelScale) placeholder.position.y += room.size.h / 2;
   group.add(placeholder);
 
-  loadModel(room.model)
-    .then((sceneRoot) => {
-      if (group.parent !== scene) return; // игрок уже вышел из комнаты, не вставляем в никуда
-
-      const instance = sceneRoot.clone(true);
-      // Геометрия/материалы у клона общие с закэшированным оригиналом —
-      // destroyRoom() не должен их dispose(), иначе следующий визит в эту
-      // комнату отрисует уже уничтоженные GPU-ресурсы. См. пометку ниже.
-      instance.userData.sharedModel = true;
+  built.loads.push(loadModel(room.model, built)
+    .then((instance) => {
       fitModelToRoom(instance, room);
       openConnectedDoors(instance, room);
-
+      group.add(instance);
+      instance.updateWorldMatrix(true, true);
+      if (room.collision === "walkmesh") built.collision = createRoomCollision(instance, built.npcMeshes);
       group.remove(placeholder);
       placeholder.geometry.dispose();
       placeholder.material.dispose();
-      group.add(instance);
+      built.ready = true;
     })
-    .catch((err) => console.error(`не удалось загрузить модель комнаты ${room.id}:`, err));
+    .catch((err) => {
+      if (err.name === "AbortError") return;
+      built.error = "Не удалось загрузить комнату. Обнови страницу, чтобы повторить.";
+      console.error(`не удалось загрузить модель комнаты ${room.id}:`, err);
+    }));
 }
 
 // Keep the authored frames and destination signs, opening only connected leaves.
@@ -257,18 +261,34 @@ function openConnectedDoors(root, room) {
   });
 }
 
-export function destroyRoom(scene, built) {
+export async function destroyRoom(scene, built) {
   if (!built) return;
+  built.disposed = true;
+  built.controller.abort();
   scene.remove(built.group);
+  built.collision = null;
   disposeOwnedResources(built.group);
+  built.group.clear();
+  built.npcMeshes = {};
+  await Promise.allSettled(built.loads);
+  built.loads.length = 0;
 }
 
 function disposeOwnedResources(obj) {
-  if (obj.userData.sharedModel) return; // общий кеш — не трогаем его geometry/material
-  if (obj.geometry) obj.geometry.dispose();
-  if (obj.material) {
-    const materials = Array.isArray(obj.material) ? obj.material : [obj.material];
-    materials.forEach((m) => m.dispose());
+  const geometries = new Set(), materials = new Set(), textures = new Set(), images = new Set();
+  obj.traverse((node) => {
+    if (node.geometry) geometries.add(node.geometry);
+    if (node.skeleton) node.skeleton.dispose();
+    for (const material of node.material ? (Array.isArray(node.material) ? node.material : [node.material]) : []) {
+      materials.add(material);
+      for (const value of Object.values(material)) if (value?.isTexture) textures.add(value);
+    }
+  });
+  for (const texture of textures) {
+    if (texture.source?.data) images.add(texture.source.data);
+    texture.dispose();
   }
-  for (const child of obj.children) disposeOwnedResources(child);
+  for (const image of images) image.close?.();
+  for (const material of materials) material.dispose();
+  for (const geometry of geometries) geometry.dispose();
 }

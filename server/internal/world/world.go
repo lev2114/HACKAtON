@@ -40,6 +40,8 @@ type Room struct {
 	Radius     float64 `json:"radius,omitempty"`
 	Spawn      *Vec3   `json:"spawn,omitempty"`
 	Doors      []Door  `json:"doors,omitempty"`
+	// Walkmesh enables client-side floors, stairs and wall collision from GLB.
+	Collision string `json:"collision,omitempty"`
 }
 
 // Door positions are local to the room, matching its authored GLB coordinates.
@@ -220,7 +222,11 @@ func matchTopics(message string) []string {
 // Returns the chosen fact, whether it's a repeat, and a list of topics that
 // still have untold facts (so the NPC can suggest what to ask about).
 func (w *World) PickFact(npcID string, message string, told map[string]bool) (fact *Fact, isRepeat bool, availableTopics []string) {
-	bank := w.Facts[npcID]
+	npc, ok := w.NPCs[npcID]
+	if !ok {
+		return nil, false, nil
+	}
+	bank := w.Facts[npc.FactBank]
 	if len(bank) == 0 {
 		return nil, false, nil
 	}
