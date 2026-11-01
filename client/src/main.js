@@ -34,9 +34,17 @@ window.__sharolet.players = players; // для отладки/автотесто
 let currentRoomBuilt = null;
 let myId = null;
 let myName = null;
+let disconnected = false;
 
 const hud = document.getElementById("hud");
 const chatBox = document.getElementById("chat");
+
+function updateHud() {
+  if (!currentRoomBuilt) return;
+  hud.textContent = disconnected
+    ? "Соединение потеряно. Проверь сервер и обнови страницу."
+    : `${myName} · ${currentRoomBuilt.room.name} · Игроков в комнате: ${players.size + 1}`;
+}
 
 function showChat(name, text) {
   chatBox.style.display = "block";
@@ -44,6 +52,11 @@ function showChat(name, text) {
 }
 
 function spawnPlayerMesh(id, x, y, z) {
+  const existing = players.get(id);
+  if (existing) {
+    existing.position.set(x, y, z);
+    return existing;
+  }
   const geo = new THREE.CapsuleGeometry(0.4, 1.2, 4, 8);
   const mat = new THREE.MeshStandardMaterial({ color: 0x66ccff });
   const mesh = new THREE.Mesh(geo, mat);
@@ -76,7 +89,6 @@ function enterChunk(chunk, teleport, roster) {
     }
   }
   net.send("move", { x: camera.position.x, y: camera.position.y, z: camera.position.z });
-  hud.textContent = `${myName} · ${chunk.room.name}`;
   chatBox.style.display = "none";
 
   // Кто уже стоял в комнате до нас — player_joined присылается только за
@@ -85,12 +97,29 @@ function enterChunk(chunk, teleport, roster) {
     if (p.playerId === myId) continue;
     spawnPlayerMesh(p.playerId, p.x, p.y, p.z);
   }
+  updateHud();
+}
+
+// A second client at the identical spawn would be inside the first avatar.
+// Pick a nearby free position and face the other player for a clear local demo.
+function separateSpawn(position, room, roster = []) {
+  const occupied = (x, z) => (roster || []).some((p) => Math.hypot(p.x - x, p.z - z) < 2);
+  if (!occupied(position.x, position.z)) return position;
+  for (const [dx, dz] of [[0, -3], [3, 0], [0, 3], [-3, 0]]) {
+    const x = position.x + dx;
+    const z = position.z + dz;
+    if (isInsideRoom(room, x, z) && !occupied(x, z)) {
+      return { ...position, x, z, yaw: Math.atan2(dx, dz) };
+    }
+  }
+  return position;
 }
 
 net.on("welcome", (msg) => {
   myId = msg.playerId;
   myName = msg.name;
-  enterChunk(msg.chunk, msg.position, msg.players);
+  disconnected = false;
+  enterChunk(msg.chunk, separateSpawn(msg.position, msg.chunk.room, msg.players), msg.players);
 });
 
 net.on("chunk_data", (msg) => {
@@ -103,6 +132,7 @@ net.on("chunk_data", (msg) => {
 net.on("player_joined", (msg) => {
   if (msg.playerId === myId) return;
   spawnPlayerMesh(msg.playerId, msg.x, msg.y, msg.z);
+  updateHud();
 });
 
 net.on("player_moved", (msg) => {
@@ -110,7 +140,16 @@ net.on("player_moved", (msg) => {
   if (mesh) mesh.position.set(msg.x, msg.y, msg.z);
 });
 
-net.on("player_left", (msg) => removePlayerMesh(msg.playerId));
+net.on("player_left", (msg) => {
+  removePlayerMesh(msg.playerId);
+  updateHud();
+});
+
+net.on("disconnect", () => {
+  disconnected = true;
+  for (const id of [...players.keys()]) removePlayerMesh(id);
+  updateHud();
+});
 
 net.on("npc_response", (msg) => showChat(msg.npcName, msg.text));
 
