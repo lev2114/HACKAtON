@@ -315,9 +315,12 @@ func (s *Server) WS(w http.ResponseWriter, r *http.Request) {
 	go client.WritePump()
 	stopPing := make(chan struct{})
 	go s.pingLoop(client, stopPing)
+	talk := make(chan incoming, 4)
+	go s.talkWorker(client, player.ID, talk)
 
 	defer func() {
 		close(stopPing)
+		close(talk)
 		room := s.Hub.RoomOf(player.ID) // перед Unregister — потом хаб его уже не помнит
 		s.Hub.Unregister(player.ID)
 		s.facility.mu.Lock()
@@ -358,7 +361,7 @@ func (s *Server) WS(w http.ResponseWriter, r *http.Request) {
 		if err != nil {
 			return
 		}
-		s.handleMessage(client, player, data)
+		s.handleMessage(client, player, talk, data)
 	}
 }
 
@@ -422,7 +425,7 @@ func (s *Server) onPong(client *hub.Client, msg incoming) {
 	})
 }
 
-func (s *Server) handleMessage(client *hub.Client, player *store.Player, raw []byte) {
+func (s *Server) handleMessage(client *hub.Client, player *store.Player, talk chan<- incoming, raw []byte) {
 	var msg incoming
 	if err := json.Unmarshal(raw, &msg); err != nil {
 		log.Printf("ws: bad message from %s: %v", player.ID, err)
@@ -437,7 +440,7 @@ func (s *Server) handleMessage(client *hub.Client, player *store.Player, raw []b
 	case "chunk_request":
 		s.onChunkRequest(client, player, msg)
 	case "npc_talk":
-		s.onNpcTalk(client, player, msg)
+		s.onNpcTalk(client, talk, msg)
 	case "pong":
 		s.onPong(client, msg)
 	default:
@@ -517,19 +520,31 @@ func (s *Server) onChunkRequest(client *hub.Client, player *store.Player, msg in
 	})
 }
 
-// onNpcTalk answers on its own goroutine: an Ollama reply can take up to
-// 30s, and doing it inline froze this connection's read loop — movement,
-// doors and ping/pong all stalled while the NPC was "thinking". Only
-// player.ID (immutable) is read here; client.Send is safe after disconnect.
-func (s *Server) onNpcTalk(client *hub.Client, player *store.Player, msg incoming) {
-	npc, ok := s.World.NPC(msg.NpcID)
-	if !ok {
+// onNpcTalk hands the message to this connection's talk worker. An Ollama
+// reply can take up to 30s; answering inline froze the read loop (movement,
+// doors and ping/pong all stalled while the NPC was "thinking"). One worker
+// per connection keeps a player's messages answered in order.
+func (s *Server) onNpcTalk(client *hub.Client, talk chan<- incoming, msg incoming) {
+	if _, ok := s.World.NPC(msg.NpcID); !ok {
 		client.Send(map[string]any{"type": "error", "code": "unknown_npc", "message": "нет такого NPC: " + msg.NpcID})
 		return
 	}
-	playerID := player.ID
+	select {
+	case talk <- msg:
+	default:
+		client.Send(map[string]any{"type": "error", "code": "npc_busy", "message": "Персонаж ещё отвечает на прошлые вопросы"})
+	}
+}
 
-	go func() {
+// talkWorker answers npc_talk messages one at a time until talk is closed.
+// Only playerID is used (not the read loop's *store.Player), and
+// client.Send is safe after disconnect.
+func (s *Server) talkWorker(client *hub.Client, playerID string, talk <-chan incoming) {
+	for msg := range talk {
+		npc, ok := s.World.NPC(msg.NpcID)
+		if !ok {
+			continue
+		}
 		told, err := s.Store.ToldFacts(playerID, npc.ID)
 		if err != nil {
 			log.Printf("npc_talk: store error for %s/%s: %v", playerID, npc.ID, err)
@@ -549,5 +564,5 @@ func (s *Server) onNpcTalk(client *hub.Client, player *store.Player, msg incomin
 		client.Send(map[string]any{
 			"type": "npc_response", "npcId": npc.ID, "npcName": npc.Name, "text": text,
 		})
-	}()
+	}
 }
