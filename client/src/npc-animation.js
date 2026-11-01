@@ -1,6 +1,9 @@
 import * as THREE from "three";
 
 const HEIGHT = 1.7;
+// Per-character size tweak by NPC id, on top of HEIGHT: Krosh's height
+// includes his long ears, so at 1.7 m his body looked smaller than the rest.
+const SIZE_BY_NPC = { krosh: 1.3 };
 // Fractions of each model's full height, including hats/antlers/ears.
 // Round bodies have no separate neck: keep the face, hat and body together.
 const profiles = {
@@ -21,7 +24,7 @@ export function createNpcAnimation(source, npc) {
   const bounds = new THREE.Box3().setFromObject(source);
   const size = bounds.getSize(new THREE.Vector3());
   const center = bounds.getCenter(new THREE.Vector3());
-  const scale = HEIGHT / (size.y || 1);
+  const scale = (HEIGHT * (SIZE_BY_NPC[npc.id] ?? 1)) / (size.y || 1);
   const fitted = new THREE.Group();
   const bones = [];
   source.traverse((node) => { if (node.isBone) bones.push(node); });
