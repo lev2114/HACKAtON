@@ -101,25 +101,38 @@
 |-----------------|-----------------------------------|--------------------------------------------------------------------|
 | `move`          | `x, y, z` (float)                 | обновляет позицию игрока, транслируется остальным в той же комнате |
 | `chunk_request` | `room` (string, id комнаты)       | игрок переходит в другую комнату, запрашивает её данные            |
-| `npc_talk`      | `npcId` (string), `message` (string) | игрок обращается к NPC                                          |
+| `npc_talk`      | `npcId` (string), `message` (string), `requestId` (number) | игрок обращается к NPC в открытом чате |
+| `npc_conversation` | `npcId` (string), `active` (boolean) | начать/поддержать или завершить разговор |
+| `pong`          | `id, fps, frameMs, memoryMB, drawCalls, triangles, paused, chatOpen, gpu` | ответ на серверный `ping` (метрики для админки) |
 
 ```json
 { "type": "move", "x": 1.2, "y": 1.6, "z": -4.0 }
 { "type": "chunk_request", "room": "room_stars" }
-{ "type": "npc_talk", "npcId": "losyash", "message": "расскажи про чёрные дыры" }
+{ "type": "npc_conversation", "npcId": "losyash", "active": true }
+{ "type": "npc_talk", "npcId": "losyash", "message": "расскажи про чёрные дыры", "requestId": 1 }
 ```
 
 ### Сервер → Клиент
 
 | type             | поля                                                  | когда отправляется                              |
 |------------------|--------------------------------------------------------|--------------------------------------------------|
-| `welcome`        | `playerId, name, position{x,y,z}, chunk, players`      | сразу после успешного подключения по WS          |
-| `chunk_data`     | `chunk, players`                                       | ответ на `chunk_request`                         |
+| `welcome`        | `playerId, name, position{x,y,z}, chunk, players, state, settings` | сразу после успешного подключения по WS |
+| `chunk_data`     | `chunk, players, state, position?`                     | ответ на `chunk_request`; с `position` — телепорт из админки |
 | `player_joined`  | `playerId, name, x, y, z`                              | кто-то зашёл в комнату, где ты сейчас находишься |
 | `player_moved`   | `playerId, x, y, z`                                    | кто-то в твоей комнате сдвинулся                 |
 | `player_left`    | `playerId`                                              | кто-то вышел из твоей комнаты (или отключился)   |
-| `npc_response`   | `npcId, npcName, text`                                  | ответ NPC на `npc_talk`                          |
-| `error`          | `code, message`                                         | невалидный запрос (неизвестная комната/NPC)      |
+| `npc_response`   | `npcId, npcName, text, requestId`                       | ответ NPC на `npc_talk`                          |
+| `ping`           | `id`                                                    | каждые 2 с; клиент сразу отвечает `pong` с тем же `id` |
+| `settings`       | `settings{walkSpeed, sprintSpeed}`                      | администратор изменил скорости (также внутри `welcome`) |
+| `announcement`   | `text`                                                  | объявление администратора всем игрокам           |
+| `error`          | `code, message, requestId?`                             | невалидный запрос; `npc_out_of_reach` / `npc_busy` — см. "Wandering NPCs", `kicked` — администратор отключил игрока |
+
+**Ping** считает сервер: время от отправки `ping` до получения `pong` с тем
+же `id`. Это RTT уровня приложения — сеть плюс задержка главного потока
+браузера (если у клиента 1 FPS, ping тоже вырастет). FPS/кадр/память/draw
+calls/GPU клиент сообщает сам; сервер их только обрезает до разумных пределов.
+`pong` обрабатывается в цикле чтения сокета, а ответы ИИ — нет (см. ниже),
+поэтому пока NPC «думает», ping не растёт.
 
 `players` — массив `{playerId, name, x, y, z}`, те, кто **уже стоит** в
 комнате на момент входа (себя сервер исключает). Нужен отдельно от
@@ -196,3 +209,106 @@ Room id сохранены. В каждой комнате один NPC; пов�
 полем; выбор факта использует его, а не id экземпляра. Память индивидуальна
 для пары игрок/экземпляр NPC. Все NPC, включая `yozhik`, загружаются из GLB через поле `model`. Камера может подняться по лестнице lobby на галерею;
 её высота синхронизируется уже существующим полем `move.y`.
+
+## Астронавты игроков (ветка character)
+
+`move` и `player_moved` сохраняют формат x/y/z. Клиент интерполирует позиции
+других игроков, вычисляет направление/скорость и анимирует скелет астронавта.
+Отдельные флаги walking/running и yaw не передаются. Shift увеличивает
+локальную скорость с 4 до 7 м/с; сервер пересылает полученные координаты как прежде.
+Аватар размещает ноги на y - 1.6 (сетевой y — высота глаз), над шлемом остаётся имя.
+
+## Интерактивные двери
+
+По каждому room.doors клиент создаёт закрытую раздвижную дверь. E открывает/
+закрывает её; chunk_request отправляется при пересечении только после полного
+открытия. При уходе сервер закрывает двери для всех после освобождения проёма; новый
+клиент получает актуальное состояние при входе.
+Состояние общее на сервере через door_set/room_state (см. ниже). Дверь рядом имеет приоритет E перед NPC-чатом.
+
+За каждым проёмом клиент создаёт коридор глубиной 3 м в составе текущего
+чанка. При открытой двери chunk_request отправляется в центре коридора, на глубине 1.5 м,
+перед торцевой стеной; GLB соседней комнаты до перехода не загружается.
+Размер створок увеличен с перекрытием рамы, контракт room.doors прежний.
+
+## Shared facility state (server authoritative)
+
+[BREAKING] Updated client and server must be deployed together.
+Client -> server: door_set {room: current room ID, door: destination room ID, open: boolean}.
+Server -> client: room_state {state:{room, revision, doors:[{room,open}], roombas:[{id,x,y,z,heading}], npcs:[{id,x,y,z,heading,talkingTo}]}}.
+welcome and chunk_data include state:{room,revision,doors,roombas,npcs}.
+Only current-room actors are sent. Revisions increase monotonically within a server run;
+clients ignore stale snapshots and retain only the snapshot for the room being entered.
+Doors are shared by the two connected rooms. Server validates proximity and rejects
+closing on any player. A successful room transition requests closure of the old room's
+doors; occupied openings close once clear. Disconnect requests the same closure.
+chunk_request requires a connected open door and a player at the corridor center.
+Roombas are simulated at 10 Hz by the server on world-data/roomba-nav.json, prepared
+offline from GLB floor/obstacle geometry. Clients interpolate poses, with no local RNG.
+No room geometry/navigation grid is sent to clients. Door and cleaner state is in memory
+and resets on server restart.
+
+### Wandering NPCs and conversations
+
+`room_state`, `welcome.state` and `chunk_data.state` also contain
+`npcs:[{id,x,y,z,heading,talkingTo}]`. Coordinates are the NPC holder/body
+anchor (feet + 1 m); heading 0 faces world +Z, increasing toward +X.
+NPC movement, random pauses and conversation facing are server-owned at 10 Hz.
+Only the current room's poses are sent; the NPC navigation graph stays on Go.
+
+Client -> server: `npc_conversation {npcId,active:boolean}`. Send active=true
+when opening chat and every 5 seconds while open, active=false when closing.
+The server checks room, floor and distance (3.4 m), releases sessions on room
+change/disconnect/timeout (15 s), and keeps an NPC still while any valid
+conversation is active. If multiple players talk to one NPC, it faces its
+current interlocutor until that conversation ends, then another active player.
+`talkingTo` is that player's ID, or an empty string while wandering.
+`npc_talk` requires the same room/proximity and an active conversation.
+AI replies run separately from the socket read loop (one pending request per
+connection), allowing chat closure/heartbeats/movement during generation.
+Response delivery is restricted to the originating live connection.
+`npc_talk` includes a numeric `requestId`, echoed in `npc_response` and
+request errors; the client ignores replies from a closed/replaced chat.
+Restart Go and refresh all clients together for NPC movement support.
+
+## Восстановление входа и повторные сессии
+
+Невалидная сохранённая room восстанавливается сервером в hub до welcome.
+Для одного playerId допускается одна активная WS-сессия; новая получает
+error {code:"session_in_use",message} и закрывается. Клиент ждёт welcome с
+непустой chunk.room перед входом в игру; ошибки до welcome показываются на
+форме входа, таймаут ожидания — 15 секунд.
+
+## Админ-панель (`/admin.html`, REST `/api/admin/*`)
+
+Отдельная страница, не часть 3D-клиента. Доступ — только аккаунтам с ролью
+администратора: колонка `players.is_admin` в SQLite. Роль выдаётся
+переменной окружения сервера `ADMIN_USERS=имя1,имя2` (при старте — уже
+существующим аккаунтам, остальным — в момент регистрации).
+
+`POST /api/admin/login {name, password}` → `{token, name}` (403, если у
+аккаунта нет роли). Это **отдельная сессия панели** в памяти сервера (12 ч):
+игровой токен не меняется, тот же аккаунт может одновременно играть.
+Все остальные запросы — с заголовком `Authorization: Bearer <token>`, без
+него 401. После перезапуска сервера в панель нужно войти заново.
+
+| метод и путь | тело / ответ | что делает |
+|---|---|---|
+| `GET /api/admin/metrics` | `{server, clients[], doors[]}` | панель опрашивает раз в секунду: метрики сервера (аптайм, Go heap, горутины, LLM: запросы/ошибки/средняя задержка/в работе/ответы по шаблону), клиенты с `stats{pingMs, fps, frameMs, memoryMB, drawCalls, triangles, paused, chatOpen, gpu, droppedMessages}`, двери |
+| `GET /api/admin/config` | `{settings, defaults, npcs[], rooms[], factBanks[]}` | всё редактируемое; у NPC — текущие поля, `profile` (правки), `defaults` (встроенные промпт/приветствие/оффтоп), `base` (из npcs.json) |
+| `PUT /api/admin/settings` | `{walkSpeed, sprintSpeed, llmEnabled, model, cleanersEnabled, cleanerSpeed}` | глобальные настройки, сразу рассылает `settings` игрокам |
+| `DELETE /api/admin/settings` | → настройки | сброс к исходным |
+| `POST /api/admin/doors` | `{a, b, open}` | открыть/закрыть дверь между комнатами без проверки расстояния |
+| `POST /api/admin/announce` | `{text}` → `{recipients}` | объявление всем (`announcement`), до 300 символов |
+| `POST /api/admin/players/{id}/teleport` | `{room}` | переносит игрока в точку появления комнаты (`chunk_data` с `position`) |
+| `POST /api/admin/players/{id}/kick` | — | `error kicked`, затем сокет закрывается |
+| `PUT /api/admin/npcs/{id}` | `{name, title, personality, profile{systemPrompt, greeting, offtopic, mode, temperature?, maxTokens}}` | поведение персонажа; пустые строки = встроенный текст. `mode`: `llm` / `fsm` (только шаблоны) / `silent` |
+| `DELETE /api/admin/npcs/{id}` | — | вернуть персонажа к исходному |
+| `GET /api/admin/npcs/{id}/memory` | `[{playerId, name, toldFacts, lines[{role, content, at}]}]` | диалоги NPC с каждым игроком (последние 40 реплик, в памяти) |
+| `DELETE /api/admin/npcs/{id}/memory?player=` | — | забыть одного игрока или всех (контекст LLM, состояние FSM, рассказанные факты) |
+| `GET/PUT/DELETE /api/admin/facts/{bank}` | `[{id, topic, difficulty, text}]` | банк фактов целиком; у новых фактов пустой `id` — сервер выдаст сам; DELETE — вернуть исходные |
+
+Правки сохраняются в SQLite (таблица `admin_config`, `kind` = `settings` /
+`npc` / `facts`) **поверх** `world-data/*.json` — сами JSON-файлы в git не
+меняются, поэтому у тиммейтов при `git pull` ничего не конфликтует. При
+старте сервер применяет сохранённые правки (`LoadAdminOverrides`).

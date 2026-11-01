@@ -46,11 +46,16 @@
         position: fixed; top: 12px; left: 12px; color: #cfd8ff; font-size: 14px;
         z-index: 5; pointer-events: none; text-shadow: 0 1px 2px #000;
       }
+      #announcement:not([hidden]) {
+        position: fixed; top: 18px; left: 50%; transform: translateX(-50%);
+        max-width: min(560px, 90vw); padding: 10px 18px; border-radius: 10px;
+        background: rgba(74, 124, 255, 0.92); color: #fff; font-size: 15px; text-align: center;
+        z-index: 25; pointer-events: none; box-shadow: 0 4px 24px rgba(0, 0, 0, 0.5);
+      }
       #controls {
         position: fixed; bottom: 10px; right: 12px; color: #8a93b8; font-size: 12px;
         z-index: 5; pointer-events: none; text-align: right; text-shadow: 0 1px 2px #000;
       }
-
       /* ── Панель диалога с NPC ── */
       #npc-dialog {
         position: fixed;
@@ -62,13 +67,14 @@
         background: rgba(8, 10, 22, 0.94);
         border: 1px solid rgba(90, 130, 255, 0.25);
         border-radius: 14px;
-        display: none;
+        display: none;          /* показывается через JS */
         flex-direction: column;
         z-index: 20;
         box-shadow: 0 4px 32px rgba(0, 0, 0, 0.6);
         overflow: hidden;
       }
 
+      /* Заголовок: имя NPC + кнопка закрытия */
       #npc-dialog-header {
         display: flex;
         align-items: center;
@@ -97,6 +103,7 @@
       }
       #npc-dialog-header .close-btn:hover { color: #f66; }
 
+      /* Область сообщений */
       #npc-dialog-messages {
         flex: 1 1 auto;
         overflow-y: auto;
@@ -108,6 +115,7 @@
         max-height: 40vh;
       }
 
+      /* Отдельное сообщение */
       .msg { font-size: 14px; line-height: 1.45; animation: msg-in .2s ease; }
       .msg.npc  { color: #e0e8ff; }
       .msg.user { color: #a8b8d8; text-align: right; }
@@ -121,6 +129,7 @@
         to   { opacity: 1; transform: translateY(0); }
       }
 
+      /* Поле ввода */
       #npc-dialog-input-row {
         display: flex;
         gap: 6px;
@@ -154,6 +163,7 @@
       #npc-dialog-send:hover { background: #3a6aee; }
       #npc-dialog-send:disabled { opacity: .45; cursor: default; }
 
+      /* Подсказка "нажми E" над NPC */
       #npc-hint {
         position: fixed;
         bottom: 140px;
@@ -167,16 +177,10 @@
         display: none;
       }
 
+      /* Скроллбар для области сообщений */
       #npc-dialog-messages::-webkit-scrollbar { width: 5px; }
       #npc-dialog-messages::-webkit-scrollbar-track { background: transparent; }
       #npc-dialog-messages::-webkit-scrollbar-thumb { background: rgba(90, 130, 255, 0.25); border-radius: 3px; }
-
-      #chat {
-        position: fixed; bottom: 48px; left: 50%; transform: translateX(-50%);
-        width: min(560px, 90vw); background: rgba(10, 12, 24, 0.88); color: #e8ecff;
-        border-radius: 10px; padding: 10px 14px; font-size: 15px; display: none; z-index: 5;
-      }
-      #chat .name { color: #8fd3ff; font-weight: 600; margin-right: 6px; }
     </style>
   </head>
   <body>
@@ -203,11 +207,11 @@
       </div>
     </div>
     <div id="hud"></div>
+    <div id="announcement" hidden></div>
     <div id="controls">
-      WASD — двигаться · мышь (ЛКМ, затем двигать) — осмотреться<br />
-      E — поговорить с ближайшим Смешариком · подойди к проёму — попадёшь в соседний отсек
+      WASD — двигаться · Shift — бежать · мышь (ЛКМ, затем двигать) — осмотреться<br />
+      E — открыть/закрыть дверь или поговорить · переход через открытую дверь
     </div>
-
     <div id="npc-hint">[E] Поговорить</div>
 
     <div id="npc-dialog">
@@ -222,7 +226,6 @@
       </div>
     </div>
 
-    <div id="chat"></div>
     <script type="module" src="/src/main.js"></script>
   </body>
 </html>

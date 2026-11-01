@@ -11,9 +11,12 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"math"
 	"net"
 	"net/http"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"time"
 	"unicode"
 
@@ -28,10 +31,11 @@ import (
 )
 
 type Server struct {
-	World *world.World
-	Store *store.Store
-	Hub   *hub.Hub
-	AI    *ai.Responder
+	World    *world.World
+	Store    *store.Store
+	Hub      *hub.Hub
+	AI       *ai.Responder
+	facility *facilityState
 
 	upgrader websocket.Upgrader
 
@@ -41,14 +45,31 @@ type Server struct {
 	// Hackathon-scale: in-memory, per-process, no cleanup of old keys.
 	loginLimiter    *ratelimit.Limiter
 	registerLimiter *ratelimit.Limiter
+	adminLimiter    *ratelimit.Limiter
+
+	settingsMu sync.RWMutex
+	settings   Settings
+
+	adminMu       sync.Mutex
+	adminSessions map[string]adminSession
+
+	startedAt time.Time
+	baseModel string // OLLAMA_MODEL at startup — "reset settings" target
 }
 
 func New(w *world.World, st *store.Store, h *hub.Hub, responder *ai.Responder) *Server {
+	_, model := responder.LLM()
 	return &Server{
-		World: w,
-		Store: st,
-		Hub:   h,
-		AI:    responder,
+		World:         w,
+		Store:         st,
+		Hub:           h,
+		AI:            responder,
+		facility:      newFacility(w),
+		settings:      defaultSettings(model),
+		adminSessions: map[string]adminSession{},
+		adminLimiter:  ratelimit.New(8, 30*time.Second),
+		startedAt:     time.Now(),
+		baseModel:     model,
 		upgrader: websocket.Upgrader{
 			ReadBufferSize:  1024,
 			WriteBufferSize: 1024,
@@ -194,6 +215,11 @@ func (s *Server) Register(w http.ResponseWriter, r *http.Request) {
 		writeJSONError(w, http.StatusInternalServerError, "внутренняя ошибка сервера")
 		return
 	}
+	if AdminNames[player.Name] {
+		if err := s.Store.SetAdmin(player.Name, true); err != nil {
+			log.Printf("register: grant admin %q: %v", player.Name, err)
+		}
+	}
 
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(authResponse{PlayerID: player.ID, Token: player.Token, Room: player.Room})
@@ -252,6 +278,25 @@ func (s *Server) WS(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "invalid token", http.StatusUnauthorized)
 		return
 	}
+	if _, valid := s.World.Rooms[player.Room]; !valid || math.IsNaN(player.X) || math.IsNaN(player.Y) || math.IsNaN(player.Z) || math.IsInf(player.X, 0) || math.IsInf(player.Y, 0) || math.IsInf(player.Z, 0) {
+		room, exists := s.World.Rooms["hub"]
+		if !exists {
+			http.Error(w, "starting room unavailable", http.StatusInternalServerError)
+			return
+		}
+		player.Room = "hub"
+		player.X, player.Y, player.Z = room.Position.X, room.Position.Y+1.6, room.Position.Z
+		if room.Spawn != nil {
+			player.X += room.Spawn.X
+			player.Y = room.Position.Y + room.Spawn.Y
+			player.Z += room.Spawn.Z
+		}
+		if err := s.Store.SavePosition(player.ID, player.Room, player.X, player.Y, player.Z); err != nil {
+			log.Printf("ws: recover room for %s: %v", player.ID, err)
+			http.Error(w, "could not restore player room", http.StatusInternalServerError)
+			return
+		}
+	}
 
 	conn, err := s.upgrader.Upgrade(w, r, nil)
 	if err != nil {
@@ -260,13 +305,33 @@ func (s *Server) WS(w http.ResponseWriter, r *http.Request) {
 	}
 
 	client := hub.NewClient(conn, player.ID, player.Name, player.Room)
-	s.Hub.Register(client)
+	if !s.Hub.Register(client) {
+		if err := conn.WriteJSON(map[string]any{"type": "error", "code": "session_in_use", "message": "Этот аккаунт уже подключён. Выйди в другом окне или используй другой аккаунт."}); err != nil {
+			log.Printf("ws: duplicate session: %v", err)
+		}
+		conn.Close()
+		return
+	}
 	s.Hub.UpdatePosition(player.ID, player.Room, player.X, player.Y, player.Z)
 	go client.WritePump()
+	ctx, cancel := context.WithCancel(r.Context())
+	defer cancel()
+	var replyBusy atomic.Bool
+	stopPing := make(chan struct{})
+	go s.pingLoop(client, stopPing)
 
 	defer func() {
+		cancel()
+		close(stopPing)
 		room := s.Hub.RoomOf(player.ID) // перед Unregister — потом хаб его уже не помнит
+		if _, valid := s.World.Rooms[room]; !valid {
+			room = player.Room
+		}
 		s.Hub.Unregister(player.ID)
+		s.facility.mu.Lock()
+		delete(s.facility.conversations, player.ID)
+		s.closeRoomDoors(room)
+		s.facility.mu.Unlock()
 		client.Close()
 		if err := s.Store.SavePosition(player.ID, room, player.X, player.Y, player.Z); err != nil {
 			log.Printf("disconnect: save error for %s: %v", player.ID, err)
@@ -278,16 +343,20 @@ func (s *Server) WS(w http.ResponseWriter, r *http.Request) {
 	}()
 
 	chunk, _ := s.World.Chunk(player.Room)
+	s.facility.mu.Lock()
 	client.Send(map[string]any{
 		"type":     "welcome",
 		"playerId": player.ID,
 		"name":     player.Name,
 		"position": world.Vec3{X: player.X, Y: player.Y, Z: player.Z},
 		"chunk":    chunk,
+		"state":    s.facilitySnapshot(player.Room),
+		"settings": s.clientSettings(),
 		// Кто уже стоит в этой комнате — без этого видно только тех, кто
 		// присоединился/подвинулся ПОСЛЕ тебя, а не тех, кто был раньше.
 		"players": s.Hub.PlayersInRoom(player.Room, player.ID),
 	})
+	s.facility.mu.Unlock()
 	s.Hub.BroadcastToRoom(player.Room, player.ID, map[string]any{
 		"type": "player_joined", "playerId": player.ID, "name": player.Name,
 		"x": player.X, "y": player.Y, "z": player.Z,
@@ -298,21 +367,82 @@ func (s *Server) WS(w http.ResponseWriter, r *http.Request) {
 		if err != nil {
 			return
 		}
-		s.handleMessage(client, player, data)
+		s.handleMessage(ctx, &replyBusy, client, player, data)
 	}
 }
 
 type incoming struct {
-	Type    string  `json:"type"`
-	Room    string  `json:"room"`
-	X       float64 `json:"x"`
-	Y       float64 `json:"y"`
-	Z       float64 `json:"z"`
-	NpcID   string  `json:"npcId"`
-	Message string  `json:"message"`
+	Active    bool    `json:"active"`
+	RequestID uint64  `json:"requestId"`
+	Door      string  `json:"door"`
+	Open      bool    `json:"open"`
+	Type      string  `json:"type"`
+	Room      string  `json:"room"`
+	X         float64 `json:"x"`
+	Y         float64 `json:"y"`
+	Z         float64 `json:"z"`
+	NpcID     string  `json:"npcId"`
+	Message   string  `json:"message"`
+
+	// pong
+	ID        uint64  `json:"id"`
+	FPS       float64 `json:"fps"`
+	FrameMs   float64 `json:"frameMs"`
+	MemoryMB  float64 `json:"memoryMB"`
+	DrawCalls int     `json:"drawCalls"`
+	Triangles int     `json:"triangles"`
+	Paused    bool    `json:"paused"`
+	ChatOpen  bool    `json:"chatOpen"`
+	GPU       string  `json:"gpu"`
 }
 
-func (s *Server) handleMessage(client *hub.Client, player *store.Player, raw []byte) {
+const pingInterval = 2 * time.Second
+
+// pingLoop measures RTT per connection: the server timestamps each ping and
+// the client answers with a pong carrying the same id plus its own FPS etc.
+func (s *Server) pingLoop(client *hub.Client, stop <-chan struct{}) {
+	ticker := time.NewTicker(pingInterval)
+	defer ticker.Stop()
+	var id uint64
+	for {
+		id++
+		client.SentPing(id)
+		client.Send(map[string]any{"type": "ping", "id": id})
+		select {
+		case <-stop:
+			return
+		case <-ticker.C:
+		}
+	}
+}
+
+func truncate(s string, n int) string {
+	if r := []rune(s); len(r) > n {
+		return string(r[:n])
+	}
+	return s
+}
+
+func (s *Server) onPong(client *hub.Client, msg incoming) {
+	clamp := func(v, max float64) float64 {
+		if math.IsNaN(v) || v < 0 {
+			return 0
+		}
+		return math.Min(v, max)
+	}
+	client.ReceivedPong(msg.ID, hub.ClientStats{
+		FPS:       clamp(msg.FPS, 1000),
+		FrameMs:   clamp(msg.FrameMs, 10000),
+		MemoryMB:  clamp(msg.MemoryMB, 1e6),
+		DrawCalls: max(msg.DrawCalls, 0),
+		Triangles: max(msg.Triangles, 0),
+		Paused:    msg.Paused,
+		ChatOpen:  msg.ChatOpen,
+		GPU:       truncate(msg.GPU, 160),
+	})
+}
+
+func (s *Server) handleMessage(ctx context.Context, replyBusy *atomic.Bool, client *hub.Client, player *store.Player, raw []byte) {
 	var msg incoming
 	if err := json.Unmarshal(raw, &msg); err != nil {
 		log.Printf("ws: bad message from %s: %v", player.ID, err)
@@ -320,12 +450,30 @@ func (s *Server) handleMessage(client *hub.Client, player *store.Player, raw []b
 	}
 
 	switch msg.Type {
+	case "npc_conversation":
+		s.onNpcConversation(client, player, msg)
+	case "door_set":
+		s.onDoorSet(client, player, msg)
 	case "move":
 		s.onMove(client, player, msg)
 	case "chunk_request":
 		s.onChunkRequest(client, player, msg)
 	case "npc_talk":
-		s.onNpcTalk(client, player, msg)
+		if !s.canTalkToNPC(player, msg.NpcID) {
+			client.Send(map[string]any{"type": "error", "code": "npc_out_of_reach", "message": "Подойди ближе и начни разговор заново", "requestId": msg.RequestID})
+			return
+		}
+		if !replyBusy.CompareAndSwap(false, true) {
+			client.Send(map[string]any{"type": "error", "code": "npc_busy", "message": "Дождись предыдущего ответа и отправь вопрос ещё раз", "requestId": msg.RequestID})
+			return
+		}
+		playerCopy := *player // Read loop can keep updating player while AI runs.
+		go func() {
+			defer replyBusy.Store(false)
+			s.onNpcTalk(ctx, client, &playerCopy, msg)
+		}()
+	case "pong":
+		s.onPong(client, msg)
 	default:
 		log.Printf("ws: unknown message type %q from %s", msg.Type, player.ID)
 	}
@@ -360,14 +508,33 @@ func (s *Server) onMove(client *hub.Client, player *store.Player, msg incoming) 
 }
 
 func (s *Server) onChunkRequest(client *hub.Client, player *store.Player, msg incoming) {
+	s.facility.mu.Lock()
+	defer s.facility.mu.Unlock()
+	oldRoom := s.Hub.RoomOf(player.ID)
+	if !s.canUseDoor(oldRoom, msg.Room, player) {
+		s.transitionError(client)
+		return
+	}
 	chunk, ok := s.World.Chunk(msg.Room)
 	if !ok {
 		client.Send(map[string]any{"type": "error", "code": "unknown_room", "message": "нет такой комнаты: " + msg.Room})
 		return
 	}
 
-	oldRoom := s.Hub.RoomOf(player.ID)
+	for _, door := range chunk.Room.Doors {
+		if door.Room != oldRoom {
+			continue
+		}
+		length := math.Hypot(door.Position.X, door.Position.Z)
+		player.X = chunk.Room.Position.X + door.Position.X - door.Position.X/length*1.4
+		player.Y = chunk.Room.Position.Y + door.Position.Y + 1.6
+		player.Z = chunk.Room.Position.Z + door.Position.Z - door.Position.Z/length*1.4
+		break
+	}
+	player.Room = msg.Room
+	delete(s.facility.conversations, player.ID)
 	s.Hub.UpdatePosition(player.ID, msg.Room, player.X, player.Y, player.Z)
+	s.closeRoomDoors(oldRoom)
 	if err := s.Store.SavePosition(player.ID, msg.Room, player.X, player.Y, player.Z); err != nil {
 		log.Printf("chunk_request: save error for %s: %v", player.ID, err)
 	}
@@ -375,6 +542,7 @@ func (s *Server) onChunkRequest(client *hub.Client, player *store.Player, msg in
 	client.Send(map[string]any{
 		"type":    "chunk_data",
 		"chunk":   chunk,
+		"state":   s.facilitySnapshot(msg.Room),
 		"players": s.Hub.PlayersInRoom(msg.Room, player.ID),
 	})
 	s.Hub.BroadcastToRoom(oldRoom, player.ID, map[string]any{"type": "player_left", "playerId": player.ID})
@@ -384,10 +552,10 @@ func (s *Server) onChunkRequest(client *hub.Client, player *store.Player, msg in
 	})
 }
 
-func (s *Server) onNpcTalk(client *hub.Client, player *store.Player, msg incoming) {
-	npc, ok := s.World.NPCs[msg.NpcID]
+func (s *Server) onNpcTalk(ctx context.Context, client *hub.Client, player *store.Player, msg incoming) {
+	npc, ok := s.World.NPC(msg.NpcID)
 	if !ok {
-		client.Send(map[string]any{"type": "error", "code": "unknown_npc", "message": "нет такого NPC: " + msg.NpcID})
+		s.Hub.SendToClient(client, map[string]any{"type": "error", "code": "unknown_npc", "message": "нет такого NPC: " + msg.NpcID, "requestId": msg.RequestID})
 		return
 	}
 
@@ -400,7 +568,10 @@ func (s *Server) onNpcTalk(client *hub.Client, player *store.Player, msg incomin
 	// Use keyword-aware PickFact instead of simple NextUntoldFact
 	fact, isRepeat, availableTopics := s.World.PickFact(npc.ID, msg.Message, told)
 
-	text := s.AI.Reply(context.Background(), npc, fact, msg.Message, isRepeat, availableTopics, player.ID)
+	text := s.AI.Reply(ctx, npc, fact, msg.Message, isRepeat, availableTopics, player.ID)
+	if ctx.Err() != nil {
+		return
+	}
 
 	if fact != nil && !isRepeat {
 		if err := s.Store.MarkToldFact(player.ID, npc.ID, fact.ID); err != nil {
@@ -408,7 +579,7 @@ func (s *Server) onNpcTalk(client *hub.Client, player *store.Player, msg incomin
 		}
 	}
 
-	client.Send(map[string]any{
-		"type": "npc_response", "npcId": npc.ID, "npcName": npc.Name, "text": text,
+	s.Hub.SendToClient(client, map[string]any{
+		"type": "npc_response", "npcId": npc.ID, "npcName": npc.Name, "text": text, "requestId": msg.RequestID,
 	})
 }

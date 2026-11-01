@@ -16,6 +16,18 @@ export class Net {
     this.handlers[type] = handler;
   }
 
+  onRoomState(handler) {
+    this.on("room_state", (message) => handler(message.state));
+  }
+
+  setDoor(room, door, open) {
+    this.send("door_set", { room, door, open });
+  }
+
+  setNpcConversation(npcId, active) {
+    this.send("npc_conversation", { npcId, active });
+  }
+
   async register(name, password) {
     return this.#auth("register", name, password);
   }
@@ -39,31 +51,42 @@ export class Net {
 
   connect(token) {
     const wsUrl = this.serverUrl.replace(/^http/, "ws") + `/ws?token=${encodeURIComponent(token)}`;
-    this.ws = new WebSocket(wsUrl);
+    const socket = new WebSocket(wsUrl);
+    this.ws = socket;
     this.intentionalClose = false;
-
-    this.ws.onmessage = (event) => {
-      let msg;
-      try {
-        msg = JSON.parse(event.data);
-      } catch (err) {
-        console.error("net: failed to parse server message:", err);
-        return;
-      }
-      const handler = this.handlers[msg.type];
-      if (handler) handler(msg);
-    };
-
     return new Promise((resolve, reject) => {
-      this.ws.onopen = () => resolve();
-      this.ws.onerror = () => reject(new Error(`Не удалось открыть WebSocket: ${this.serverUrl}. Проверь Go-сервер.`));
-      this.ws.onclose = () => {
+      let welcomed = false;
+      const fail = (message) => {
+        clearTimeout(timeout);
+        reject(new Error(message));
+        socket.close();
+      };
+      const timeout = setTimeout(() => fail("Сервер не прислал комнату. Перезапусти Go-сервер и попробуй снова."), 15000);
+      socket.onmessage = (event) => {
+        if (this.ws !== socket) return;
+        let msg;
+        try { msg = JSON.parse(event.data); }
+        catch (error) { console.error("net: invalid message", error); return; }
+        if (!welcomed && msg.type === "error") { fail(msg.message || "Не удалось войти на станцию."); return; }
+        if (msg.type === "welcome") {
+          if (!msg.chunk?.room) { fail("Сохранённая комната недоступна. Перезапусти обновлённый Go-сервер и войди снова."); return; }
+          welcomed = true;
+          clearTimeout(timeout);
+        }
+        const handler = this.handlers[msg.type];
+        if (handler) handler(msg);
+        if (msg.type === "welcome") resolve();
+      };
+      socket.onerror = () => fail(`Не удалось открыть WebSocket: ${this.serverUrl}. Проверь Go-сервер.`);
+      socket.onclose = () => {
+        clearTimeout(timeout);
+        if (this.ws !== socket) return;
         // A deliberate disconnect() (logout) closes the socket itself —
         // that's not the "lost connection" case the disconnect handler
         // communicates to the player, so it's suppressed here.
         if (this.intentionalClose) return;
         reject(new Error(`Соединение с ${this.serverUrl} закрыто.`));
-        this.handlers.disconnect?.();
+        if (welcomed) this.handlers.disconnect?.();
       };
     });
   }
