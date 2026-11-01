@@ -366,15 +366,16 @@ function makeNameTag(name) {
 // Облачко сообщения над головой игрока (THREE.Sprite billboard)
 function createSpeechBubbleSprite(text) {
   const canvas = document.createElement("canvas");
-  canvas.width = 512;
-  canvas.height = 256;
+  canvas.width = 1024;
+  canvas.height = 512;
   const ctx = canvas.getContext("2d");
 
-  const fontSize = 24;
-  const lineHeight = 32;
+  // Увеличенный чёткий шрифт
+  const fontSize = 42;
+  const lineHeight = 54;
   ctx.font = "bold " + fontSize + "px system-ui, -apple-system, sans-serif";
 
-  const maxWidth = 450;
+  const maxWidth = 880;
   const words = text.split(" ");
   const lines = [];
   let cur = "";
@@ -399,16 +400,17 @@ function createSpeechBubbleSprite(text) {
     const w = ctx.measureText(l).width;
     if (w > maxW) maxW = w;
   }
-  const bubbleW = Math.max(160, Math.min(480, maxW + 44));
-  const bubbleH = 30 + lines.length * lineHeight;
-  const x = (512 - bubbleW) / 2;
-  const y = 190 - bubbleH;
-  const radius = 14;
+  // Увеличенная плашка с комфортными отступами
+  const bubbleW = Math.max(300, Math.min(960, maxW + 72));
+  const bubbleH = 46 + lines.length * lineHeight;
+  const x = (1024 - bubbleW) / 2;
+  const y = 420 - bubbleH;
+  const radius = 24;
 
   ctx.save();
-  ctx.shadowColor = "rgba(0, 0, 0, 0.65)";
-  ctx.shadowBlur = 14;
-  ctx.shadowOffsetY = 4;
+  ctx.shadowColor = "rgba(0, 0, 0, 0.75)";
+  ctx.shadowBlur = 20;
+  ctx.shadowOffsetY = 6;
 
   ctx.beginPath();
   ctx.moveTo(x + radius, y);
@@ -417,20 +419,20 @@ function createSpeechBubbleSprite(text) {
   ctx.lineTo(x + bubbleW, y + bubbleH - radius);
   ctx.quadraticCurveTo(x + bubbleW, y + bubbleH, x + bubbleW - radius, y + bubbleH);
   // Стрелочка вниз по центру, указывает на шлем
-  ctx.lineTo(256 + 12, y + bubbleH);
-  ctx.lineTo(256, y + bubbleH + 16);
-  ctx.lineTo(256 - 12, y + bubbleH);
+  ctx.lineTo(512 + 20, y + bubbleH);
+  ctx.lineTo(512, y + bubbleH + 28);
+  ctx.lineTo(512 - 20, y + bubbleH);
   ctx.lineTo(x + radius, y + bubbleH);
   ctx.quadraticCurveTo(x, y + bubbleH, x, y + bubbleH - radius);
   ctx.lineTo(x, y + radius);
   ctx.quadraticCurveTo(x, y, x + radius, y);
   ctx.closePath();
 
-  ctx.fillStyle = "rgba(12, 16, 32, 0.94)";
+  ctx.fillStyle = "rgba(10, 14, 30, 0.95)";
   ctx.fill();
 
   ctx.strokeStyle = "#4fd8ff";
-  ctx.lineWidth = 3;
+  ctx.lineWidth = 5;
   ctx.stroke();
   ctx.restore();
 
@@ -439,17 +441,18 @@ function createSpeechBubbleSprite(text) {
   ctx.textAlign = "center";
   ctx.textBaseline = "middle";
 
-  const startY = y + 16 + lineHeight / 2;
+  const startY = y + 24 + lineHeight / 2;
   for (let i = 0; i < lines.length; i++) {
-    ctx.fillText(lines[i], 256, startY + i * lineHeight);
+    ctx.fillText(lines[i], 512, startY + i * lineHeight);
   }
 
   const texture = new THREE.CanvasTexture(canvas);
   const sprite = new THREE.Sprite(new THREE.SpriteMaterial({ map: texture, depthTest: false, transparent: true }));
-  const worldW = (bubbleW / 512) * 2.8;
-  const worldH = ((bubbleH + 18) / 256) * 1.4;
+  // Увеличенный масштаб в 3D мире (~4.8м ширина, ~2.4м высота)
+  const worldW = (bubbleW / 1024) * 4.8;
+  const worldH = ((bubbleH + 34) / 512) * 2.4;
   sprite.scale.set(worldW, worldH, 1);
-  sprite.position.y = 0.85 + worldH / 2;
+  sprite.position.y = 0.9 + worldH / 2;
   sprite.renderOrder = 10;
   return sprite;
 }
