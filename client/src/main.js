@@ -126,29 +126,41 @@ function getLogicalNpcKey(npcId) {
   return npcId;
 }
 
-const dialogueHistories = {};
+let dialogueHistories = {};
+
+function getUserScope() {
+  return myId || myName || "guest";
+}
 
 function getHistory(logicalKey) {
-  if (!dialogueHistories[logicalKey]) {
+  const user = getUserScope();
+  const cacheKey = `${user}:${logicalKey}`;
+  if (!dialogueHistories[cacheKey]) {
     try {
-      const stored = sessionStorage.getItem("sharolyot_chat_" + logicalKey);
-      dialogueHistories[logicalKey] = stored ? JSON.parse(stored) : [];
+      const stored = sessionStorage.getItem(`sharolyot_chat_${user}_${logicalKey}`);
+      dialogueHistories[cacheKey] = stored ? JSON.parse(stored) : [];
     } catch {
-      dialogueHistories[logicalKey] = [];
+      dialogueHistories[cacheKey] = [];
     }
   }
-  return dialogueHistories[logicalKey];
+  return dialogueHistories[cacheKey];
 }
 
 function appendToHistory(logicalKey, author, text, isUser) {
+  const user = getUserScope();
+  const cacheKey = `${user}:${logicalKey}`;
   const list = getHistory(logicalKey);
   list.push({ author, text, isUser });
   if (list.length > 60) {
     list.splice(0, list.length - 60);
   }
   try {
-    sessionStorage.setItem("sharolyot_chat_" + logicalKey, JSON.stringify(list));
+    sessionStorage.setItem(`sharolyot_chat_${user}_${logicalKey}`, JSON.stringify(list));
   } catch {}
+}
+
+function clearUserDialogueHistories() {
+  dialogueHistories = {};
 }
 
 function renderMessageElement(author, text, isUser) {
@@ -395,6 +407,7 @@ function separateSpawn(position, room, roster = []) {
 net.on("welcome", (msg) => {
   myId = msg.playerId;
   myName = msg.name;
+  clearUserDialogueHistories();
   disconnected = false;
   enterChunk(msg.chunk, separateSpawn(msg.position, msg.chunk.room, msg.players), msg.players);
 });
@@ -708,6 +721,7 @@ function stopGame() {
   for (const id of [...players.keys()]) removePlayerMesh(id);
   myId = null;
   myName = null;
+  clearUserDialogueHistories();
   disconnected = false;
   if (chatOpen) closeChat();
   chatBox.style.display = "none";
