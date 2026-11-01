@@ -1,6 +1,21 @@
 import * as THREE from "three";
+import { MeshBVH, acceleratedRaycast } from "three-mesh-bvh";
 
 export const EYE_HEIGHT = 1.6;
+
+// Collision casts dozens of rays per frame; without an index each ray tests
+// every triangle of every nearby mesh. On the lobby stairs (treads, railings,
+// gallery) that dropped a GTX 1660 Ti to ~4 FPS. A BVH returns the same hits
+// (same triangles, sides, near/far) — only faster.
+function accelerate(mesh) {
+  const geometry = mesh.geometry;
+  // Skinned/morphed meshes are raycast in their current pose by three.js;
+  // a BVH would use the rest pose, so leave them on the exact default path.
+  if (mesh.isSkinnedMesh || geometry.morphAttributes?.position?.length) return;
+  // indirect: the render geometry's index is left untouched.
+  geometry.boundsTree ??= new MeshBVH(geometry, { indirect: true });
+  mesh.raycast = acceleratedRaycast;
+}
 const STEP_HEIGHT = 0.24; // Authored lobby stair risers are 0.19 m.
 const MAX_DROP = 0.28;
 const BODY_RADIUS = 0.25;
@@ -26,6 +41,7 @@ export function createRoomCollision(root, npcMeshes = {}, extraRoots = []) {
     collisionRoot.updateWorldMatrix(true, true);
     collisionRoot.traverseVisible((mesh) => {
       if (!mesh.isMesh) return;
+      accelerate(mesh);
       const entry = { mesh, box: new THREE.Box3().setFromObject(mesh) };
       solids.push(entry);
       if (/continuous.*floor|level.*floor|floor.*disc|Stair.*tread|Gallery.*walking.surface|corridor.*floor|level.connection/i.test(mesh.name)) {
