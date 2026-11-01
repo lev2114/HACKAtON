@@ -3,6 +3,37 @@ import { Net } from "./net.js";
 import { buildRoom, destroyRoom } from "./world.js";
 import { createCosmicSky } from "./sky.js";
 
+// Рисуем приглушённый звёздный фон для экрана входа один раз на canvas и
+// подставляем как CSS-фон — не трогает игровую сцену/рендер-луп (тот
+// стартует только после успешного логина).
+function paintLoginStarfield(el) {
+  const canvas = document.createElement("canvas");
+  canvas.width = 900;
+  canvas.height = 900;
+  const ctx = canvas.getContext("2d");
+
+  const grad = ctx.createRadialGradient(280, 200, 0, 280, 200, 800);
+  grad.addColorStop(0, "#140b26");
+  grad.addColorStop(0.5, "#08070f");
+  grad.addColorStop(1, "#030308");
+  ctx.fillStyle = grad;
+  ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+  for (let i = 0; i < 260; i++) {
+    const x = Math.random() * canvas.width;
+    const y = Math.random() * canvas.height;
+    const r = Math.random() < 0.85 ? Math.random() * 0.7 + 0.3 : Math.random() * 1.3 + 0.8;
+    const alpha = Math.random() * 0.5 + 0.25;
+    ctx.beginPath();
+    ctx.arc(x, y, r, 0, Math.PI * 2);
+    ctx.fillStyle = `rgba(255,255,255,${alpha})`;
+    ctx.fill();
+  }
+
+  el.style.backgroundImage = `url(${canvas.toDataURL()})`;
+  el.style.backgroundSize = "cover";
+}
+
 const net = new Net();
 
 const scene = new THREE.Scene();
@@ -39,6 +70,35 @@ let roomVersion = 0;
 let myId = null;
 let myName = null;
 let disconnected = false;
+let running = false; // тик идёт только пока мы реально в игре (не на логине/паузе)
+let paused = false;
+
+// "Запомнить меня": токен сессии живёт в localStorage, чтобы обновление
+// страницы не требовало повторного ввода пароля. Хранить сам пароль нельзя,
+// а токен — такой же bearer-секрет, как cookie сессии, поэтому logout явно
+// его стирает (см. stopGame).
+const SESSION_KEY = "sharolet.session";
+function saveSession(token, name) {
+  try {
+    localStorage.setItem(SESSION_KEY, JSON.stringify({ token, name }));
+  } catch {
+    // приватный режим / заблокировано — просто не запоминаем, не критично
+  }
+}
+function loadSession() {
+  try {
+    return JSON.parse(localStorage.getItem(SESSION_KEY));
+  } catch {
+    return null;
+  }
+}
+function clearSession() {
+  try {
+    localStorage.removeItem(SESSION_KEY);
+  } catch {
+    // ignore
+  }
+}
 
 const hud = document.getElementById("hud");
 const chatBox = document.getElementById("chat");
@@ -57,7 +117,30 @@ function showChat(name, text) {
   chatBox.innerHTML = `<span class="name">${name}:</span>${text}`;
 }
 
-function spawnPlayerMesh(id, x, y, z) {
+// Канвас-текстура с именем, billboard (THREE.Sprite всегда смотрит на
+// камеру сам, не нужно вручную разворачивать на каждом кадре).
+function makeNameTag(name) {
+  const canvas = document.createElement("canvas");
+  canvas.width = 256;
+  canvas.height = 64;
+  const ctx = canvas.getContext("2d");
+  ctx.fillStyle = "rgba(10, 12, 24, 0.75)";
+  ctx.fillRect(0, 16, 256, 32);
+  ctx.font = "bold 28px system-ui, sans-serif";
+  ctx.textAlign = "center";
+  ctx.textBaseline = "middle";
+  ctx.fillStyle = "#e8ecff";
+  ctx.fillText(name, 128, 33);
+
+  const texture = new THREE.CanvasTexture(canvas);
+  const sprite = new THREE.Sprite(new THREE.SpriteMaterial({ map: texture, depthTest: false }));
+  sprite.scale.set(1.6, 0.4, 1);
+  sprite.position.y = 1.3; // над капсулой
+  sprite.renderOrder = 1; // поверх стен/моделей комнаты
+  return sprite;
+}
+
+function spawnPlayerMesh(id, name, x, y, z) {
   const existing = players.get(id);
   if (existing) {
     existing.position.set(x, y, z);
@@ -67,6 +150,7 @@ function spawnPlayerMesh(id, x, y, z) {
   const mat = new THREE.MeshStandardMaterial({ color: 0x66ccff });
   const mesh = new THREE.Mesh(geo, mat);
   mesh.position.set(x, y, z);
+  mesh.add(makeNameTag(name || "?"));
   scene.add(mesh);
   players.set(id, mesh);
   return mesh;
@@ -78,6 +162,10 @@ function removePlayerMesh(id) {
   scene.remove(mesh);
   mesh.geometry.dispose();
   mesh.material.dispose();
+  for (const child of mesh.children) {
+    if (child.material?.map) child.material.map.dispose();
+    child.material?.dispose();
+  }
   players.delete(id);
 }
 
@@ -105,7 +193,7 @@ async function enterChunk(chunk, teleport, roster) {
   // события ПОСЛЕ нашего входа, без ростера мы бы их никогда не увидели.
   for (const p of roster || []) {
     if (p.playerId === myId) continue;
-    spawnPlayerMesh(p.playerId, p.x, p.y, p.z);
+    spawnPlayerMesh(p.playerId, p.name, p.x, p.y, p.z);
   }
   updateHud();
   await roomCleanup;
@@ -146,7 +234,7 @@ net.on("chunk_data", (msg) => {
 
 net.on("player_joined", (msg) => {
   if (msg.playerId === myId) return;
-  spawnPlayerMesh(msg.playerId, msg.x, msg.y, msg.z);
+  spawnPlayerMesh(msg.playerId, msg.name, msg.x, msg.y, msg.z);
   updateHud();
 });
 
@@ -373,53 +461,178 @@ const clock = new THREE.Clock();
 let lastSentAt = 0;
 
 function tick() {
+  if (!running) return; // остановлено логаутом — не планируем следующий кадр
+
   const dt = Math.min(clock.getDelta(), 0.05);
-  camera.rotation.y = yaw;
-  camera.rotation.x = pitch;
 
-  const forward = new THREE.Vector3(-Math.sin(yaw), 0, -Math.cos(yaw));
-  const right = new THREE.Vector3(-forward.z, 0, forward.x);
-  const move = new THREE.Vector3();
-  if (keys["KeyW"]) move.add(forward);
-  if (keys["KeyS"]) move.sub(forward);
-  if (keys["KeyD"]) move.add(right);
-  if (keys["KeyA"]) move.sub(right);
-  if (move.lengthSq() > 0) {
-    move.normalize().multiplyScalar(speed * dt);
-  }
+  if (!paused) {
+    camera.rotation.y = yaw;
+    camera.rotation.x = pitch;
 
-  if (currentRoomBuilt?.ready && !pendingRoomId && !disconnected) {
-    if (currentRoomBuilt.collision) currentRoomBuilt.collision.move(camera.position, move);
-    else camera.position.add(move);
-    const resolved = resolveCollision(currentRoomBuilt.room, currentRoomBuilt.neighbors, camera.position.x, camera.position.z);
-    camera.position.x = resolved.x;
-    camera.position.z = resolved.z;
-    maybeAutoEnterNeighbor();
-  }
-  updateHud();
+    const forward = new THREE.Vector3(-Math.sin(yaw), 0, -Math.cos(yaw));
+    const right = new THREE.Vector3(-forward.z, 0, forward.x);
+    const move = new THREE.Vector3();
+    if (keys["KeyW"]) move.add(forward);
+    if (keys["KeyS"]) move.sub(forward);
+    if (keys["KeyD"]) move.add(right);
+    if (keys["KeyA"]) move.sub(right);
+    if (move.lengthSq() > 0) {
+      move.normalize().multiplyScalar(speed * dt);
+    }
 
-  const now = performance.now();
-  if (now - lastSentAt > 50) {
-    lastSentAt = now;
-    net.send("move", { x: camera.position.x, y: camera.position.y, z: camera.position.z });
+    if (currentRoomBuilt?.ready && !pendingRoomId && !disconnected) {
+      if (currentRoomBuilt.collision) currentRoomBuilt.collision.move(camera.position, move);
+      else camera.position.add(move);
+      const resolved = resolveCollision(currentRoomBuilt.room, currentRoomBuilt.neighbors, camera.position.x, camera.position.z);
+      camera.position.x = resolved.x;
+      camera.position.z = resolved.z;
+      maybeAutoEnterNeighbor();
+    }
+    updateHud();
+
+    const now = performance.now();
+    if (now - lastSentAt > 50) {
+      lastSentAt = now;
+      net.send("move", { x: camera.position.x, y: camera.position.y, z: camera.position.z });
+    }
   }
 
   cosmicSky.render(renderer, scene, camera);
   requestAnimationFrame(tick);
 }
 
+function startGame() {
+  loginEl.style.display = "none";
+  pauseEl.hidden = true;
+  paused = false;
+  if (!running) {
+    running = true;
+    tick();
+  }
+}
+
+// Выход: рвёт соединение (без "потеряно"-сообщения), чистит состояние сцены
+// и "запомни меня", возвращает на экран входа.
+function stopGame() {
+  running = false;
+  paused = false;
+  net.disconnect();
+  if (document.pointerLockElement) document.exitPointerLock();
+
+  ++roomVersion; // отменяет любой незавершённый enterChunk, не даёт ему достроить комнату после logout
+  roomCleanup = roomCleanup.then(() => destroyRoom(scene, currentRoomBuilt));
+  currentRoomBuilt = null;
+  for (const id of [...players.keys()]) removePlayerMesh(id);
+  myId = null;
+  myName = null;
+  disconnected = false;
+  chatBox.style.display = "none";
+
+  clearSession();
+  pauseEl.hidden = true;
+  loginEl.style.display = "flex";
+  loginError.textContent = "";
+  loginSubmit.disabled = false;
+}
+
 const loginEl = document.getElementById("login");
+paintLoginStarfield(loginEl);
+
 const loginForm = document.getElementById("login-form");
+const loginError = document.getElementById("login-error");
+const loginSubmit = document.getElementById("login-submit");
+const loginPasswordHint = document.getElementById("login-password-hint");
+const tabs = document.querySelectorAll("#login .tab");
+
+let authMode = "login"; // "login" | "register"
+const submitLabel = { login: "Войти на станцию", register: "Зарегистрироваться" };
+
+for (const tab of tabs) {
+  tab.addEventListener("click", () => {
+    authMode = tab.dataset.mode;
+    for (const t of tabs) t.classList.toggle("active", t === tab);
+    loginSubmit.textContent = submitLabel[authMode];
+    loginPasswordHint.hidden = authMode !== "register";
+    loginError.textContent = "";
+  });
+}
+
+// Та же политика, что сервер проверяет в Register (handlers.go) — здесь
+// только для мгновенной подсказки без похода на сервер, финальное слово
+// всё равно за сервером.
+const PASSWORD_POLICY_MESSAGE = "Пароль должен быть не короче 8 символов и содержать цифру, строчную и заглавную букву";
+function passwordPolicyError(password) {
+  if (password.length < 8) return PASSWORD_POLICY_MESSAGE;
+  if (!/[0-9]/.test(password) || !/[a-zа-яё]/i.test(password) || !/[A-ZА-ЯЁ]/.test(password)) {
+    return PASSWORD_POLICY_MESSAGE;
+  }
+  return null;
+}
+
 loginForm.addEventListener("submit", async (e) => {
   e.preventDefault();
   const name = document.getElementById("login-name").value.trim();
-  if (!name) return;
+  const password = document.getElementById("login-password").value;
+  loginError.textContent = "";
+  if (!name || !password) {
+    loginError.textContent = "Введи имя и пароль";
+    return;
+  }
+
+  if (authMode === "register") {
+    const policyError = passwordPolicyError(password);
+    if (policyError) {
+      loginError.textContent = policyError;
+      return;
+    }
+  }
+
+  loginSubmit.disabled = true;
   try {
-    const { token } = await net.login(name);
+    const { token } = authMode === "register" ? await net.register(name, password) : await net.login(name, password);
     await net.connect(token);
-    loginEl.style.display = "none";
-    tick();
+    saveSession(token, name);
+    startGame();
   } catch (err) {
-    alert("Не удалось подключиться к серверу: " + err.message);
+    loginError.textContent = err.message;
+  } finally {
+    loginSubmit.disabled = false;
   }
 });
+
+// --- Пауза (Esc во время игры) и выход ---
+const pauseEl = document.getElementById("pause");
+document.getElementById("pause-resume").addEventListener("click", () => {
+  paused = false;
+  pauseEl.hidden = true;
+  renderer.domElement.requestPointerLock();
+});
+document.getElementById("pause-exit").addEventListener("click", stopGame);
+
+window.addEventListener("keydown", (e) => {
+  if (e.code !== "Escape" || !running) return;
+  paused = !paused;
+  pauseEl.hidden = !paused;
+  if (!paused) renderer.domElement.requestPointerLock();
+  else if (document.pointerLockElement) document.exitPointerLock();
+});
+
+// "Запомни меня": если в localStorage лежит валидный токен — пробуем
+// подключиться им напрямую, без формы логина. Невалидный/просроченный
+// токен (сервер ответит отказом на апгрейд WS) просто стирается, и
+// экран входа работает как обычно.
+(async function tryAutoLogin() {
+  const session = loadSession();
+  if (!session?.token) return;
+  loginSubmit.disabled = true;
+  loginError.textContent = `Подключаемся как ${session.name}…`;
+  try {
+    await net.connect(session.token);
+    startGame();
+  } catch {
+    clearSession();
+    loginError.textContent = "";
+  } finally {
+    loginSubmit.disabled = false;
+  }
+})();

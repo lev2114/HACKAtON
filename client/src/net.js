@@ -16,19 +16,31 @@ export class Net {
     this.handlers[type] = handler;
   }
 
-  async login(name) {
-    const res = await fetch(`${this.serverUrl}/api/login`, {
+  async register(name, password) {
+    return this.#auth("register", name, password);
+  }
+
+  async login(name, password) {
+    return this.#auth("login", name, password);
+  }
+
+  async #auth(endpoint, name, password) {
+    const res = await fetch(`${this.serverUrl}/api/${endpoint}`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ name }),
+      body: JSON.stringify({ name, password }),
     });
-    if (!res.ok) throw new Error(`Сервер ${this.serverUrl} не выполнил вход (HTTP ${res.status}). Проверь, что Go-сервер запущен.`);
+    if (!res.ok) {
+      const body = await res.json().catch(() => null);
+      throw new Error(body?.error || `Сервер ${this.serverUrl} ответил HTTP ${res.status}.`);
+    }
     return res.json();
   }
 
   connect(token) {
     const wsUrl = this.serverUrl.replace(/^http/, "ws") + `/ws?token=${encodeURIComponent(token)}`;
     this.ws = new WebSocket(wsUrl);
+    this.intentionalClose = false;
 
     this.ws.onmessage = (event) => {
       let msg;
@@ -46,10 +58,21 @@ export class Net {
       this.ws.onopen = () => resolve();
       this.ws.onerror = () => reject(new Error(`Не удалось открыть WebSocket: ${this.serverUrl}. Проверь Go-сервер.`));
       this.ws.onclose = () => {
+        // A deliberate disconnect() (logout) closes the socket itself —
+        // that's not the "lost connection" case the disconnect handler
+        // communicates to the player, so it's suppressed here.
+        if (this.intentionalClose) return;
         reject(new Error(`Соединение с ${this.serverUrl} закрыто.`));
         this.handlers.disconnect?.();
       };
     });
+  }
+
+  // Logout: closes the socket without triggering the "lost connection" UI.
+  disconnect() {
+    this.intentionalClose = true;
+    this.ws?.close();
+    this.ws = null;
   }
 
   send(type, payload = {}) {

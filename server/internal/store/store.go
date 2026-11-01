@@ -1,21 +1,35 @@
-// Package store persists player state and per-player NPC memory in SQLite.
-// This is what makes NPCs "remember" a player across reconnects and what
-// satisfies the task's "player state saved server-side" requirement.
+// Package store persists player accounts and per-player NPC memory in
+// SQLite. This is what makes NPCs "remember" a player across reconnects and
+// what satisfies the task's "player state saved server-side" requirement.
 package store
 
 import (
 	"database/sql"
+	"errors"
 	"fmt"
+	"strings"
+	"time"
 
 	_ "modernc.org/sqlite"
 )
 
+var ErrNotFound = errors.New("player not found")
+
+// TokenTTL bounds how long a session token stays valid after it's issued
+// (register/login). Previously tokens never expired — a leaked token (e.g.
+// from a browser's localStorage, now that "remember me" persists it there)
+// would have stayed valid forever. Logging in again always issues a fresh
+// token with a fresh TTL, so this only matters for abandoned/leaked tokens.
+const TokenTTL = 14 * 24 * time.Hour
+
 type Player struct {
-	ID    string
-	Name  string
-	Token string
-	Room  string
-	X, Y, Z float64
+	ID             string
+	Name           string
+	PasswordHash   string
+	Token          string
+	TokenExpiresAt time.Time
+	Room           string
+	X, Y, Z        float64
 }
 
 type Store struct {
@@ -25,8 +39,10 @@ type Store struct {
 const schema = `
 CREATE TABLE IF NOT EXISTS players (
 	id TEXT PRIMARY KEY,
-	name TEXT NOT NULL,
+	name TEXT NOT NULL UNIQUE,
+	password_hash TEXT NOT NULL,
 	token TEXT NOT NULL UNIQUE,
+	token_expires_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
 	room TEXT NOT NULL DEFAULT 'hub',
 	x REAL NOT NULL DEFAULT 0,
 	y REAL NOT NULL DEFAULT 0,
@@ -57,30 +73,78 @@ func Open(path string) (*Store, error) {
 	if _, err := db.Exec(schema); err != nil {
 		return nil, fmt.Errorf("migrate: %w", err)
 	}
+	// token_expires_at was added after the first version of this schema
+	// shipped — this backfills it on any station.db that predates it.
+	// SQLite has no "ADD COLUMN IF NOT EXISTS", so we just ignore the
+	// "duplicate column" error when it's already there. SQLite also
+	// rejects a non-constant default (CURRENT_TIMESTAMP) on ADD COLUMN, so
+	// this uses a fixed past date instead — existing tokens just read as
+	// already-expired, which only means those sessions need one fresh
+	// login (a new token gets a real TTL via UpdateToken).
+	if _, err := db.Exec(`ALTER TABLE players ADD COLUMN token_expires_at DATETIME NOT NULL DEFAULT '1970-01-01 00:00:00'`); err != nil {
+		if !strings.Contains(err.Error(), "duplicate column") {
+			return nil, fmt.Errorf("migrate token_expires_at: %w", err)
+		}
+	}
 	return &Store{db: db}, nil
 }
 
-func (s *Store) UpsertPlayer(p Player) error {
-	_, err := s.db.Exec(`
-		INSERT INTO players (id, name, token, room, x, y, z, updated_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
-		ON CONFLICT(id) DO UPDATE SET
-			name = excluded.name,
-			token = excluded.token,
-			room = excluded.room,
-			x = excluded.x, y = excluded.y, z = excluded.z,
-			updated_at = CURRENT_TIMESTAMP
-	`, p.ID, p.Name, p.Token, p.Room, p.X, p.Y, p.Z)
+// CreatePlayer registers a brand-new account. Callers must check PlayerByName
+// first (httpapi does, to return a clean "name taken" error) — name is also
+// UNIQUE at the DB level as a backstop.
+func (s *Store) CreatePlayer(p Player) error {
+	_, err := s.db.Exec(
+		`INSERT INTO players (id, name, password_hash, token, token_expires_at, room, x, y, z, updated_at)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)`,
+		p.ID, p.Name, p.PasswordHash, p.Token, time.Now().Add(TokenTTL), p.Room, p.X, p.Y, p.Z,
+	)
 	return err
 }
 
-func (s *Store) PlayerByToken(token string) (*Player, error) {
-	row := s.db.QueryRow(`SELECT id, name, token, room, x, y, z FROM players WHERE token = ?`, token)
+func (s *Store) PlayerByName(name string) (*Player, error) {
+	row := s.db.QueryRow(
+		`SELECT id, name, password_hash, token, token_expires_at, room, x, y, z FROM players WHERE name = ?`, name,
+	)
 	var p Player
-	if err := row.Scan(&p.ID, &p.Name, &p.Token, &p.Room, &p.X, &p.Y, &p.Z); err != nil {
+	if err := row.Scan(&p.ID, &p.Name, &p.PasswordHash, &p.Token, &p.TokenExpiresAt, &p.Room, &p.X, &p.Y, &p.Z); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil, ErrNotFound
+		}
 		return nil, err
 	}
 	return &p, nil
+}
+
+// PlayerByToken also rejects an expired token as ErrNotFound (same as "no
+// such token") — the caller (WS handshake) doesn't need to distinguish
+// "never existed" from "expired", both just mean "log in again".
+func (s *Store) PlayerByToken(token string) (*Player, error) {
+	row := s.db.QueryRow(
+		`SELECT id, name, password_hash, token, token_expires_at, room, x, y, z FROM players WHERE token = ?`, token,
+	)
+	var p Player
+	if err := row.Scan(&p.ID, &p.Name, &p.PasswordHash, &p.Token, &p.TokenExpiresAt, &p.Room, &p.X, &p.Y, &p.Z); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil, ErrNotFound
+		}
+		return nil, err
+	}
+	if time.Now().After(p.TokenExpiresAt) {
+		return nil, ErrNotFound
+	}
+	return &p, nil
+}
+
+// UpdateToken issues a fresh session token (with a fresh TTL) on login — the
+// old one, if any client still holds it, stops working. Simplest way to not
+// accumulate live tokens per account forever, and it bounds how long a
+// leaked/forgotten token (e.g. in a browser's localStorage) stays useful.
+func (s *Store) UpdateToken(id, token string) error {
+	_, err := s.db.Exec(
+		`UPDATE players SET token = ?, token_expires_at = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?`,
+		token, time.Now().Add(TokenTTL), id,
+	)
+	return err
 }
 
 func (s *Store) SavePosition(id, room string, x, y, z float64) error {
