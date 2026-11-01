@@ -130,6 +130,57 @@ let thinkingEl = null; // элемент "думает..."
 let chatRequestId = 0;
 let lastConversationHeartbeat = 0;
 
+// The same character in two rooms shares dialogue history, scoped by account.
+function getLogicalNpcKey(npcId) {
+  if (npcId === "sovunya" || npcId === "sovunya_dining") return "sovunya";
+  if (npcId === "losyash" || npcId === "losyash_chemistry") return "losyash";
+  return npcId;
+}
+
+let dialogueHistories = {};
+
+function getUserScope() {
+  return myId || myName || "guest";
+}
+
+function getHistory(logicalKey) {
+  const user = getUserScope();
+  const cacheKey = `${user}:${logicalKey}`;
+  if (!dialogueHistories[cacheKey]) {
+    try {
+      const stored = JSON.parse(sessionStorage.getItem(`sharolyot_chat_${user}_${logicalKey}`) || "[]");
+      dialogueHistories[cacheKey] = Array.isArray(stored) ? stored.filter((entry) =>
+        typeof entry?.author === "string" && typeof entry.text === "string" && typeof entry.isUser === "boolean"
+      ).slice(-60) : [];
+    } catch {
+      dialogueHistories[cacheKey] = [];
+    }
+  }
+  return dialogueHistories[cacheKey];
+}
+
+function appendToHistory(logicalKey, author, text, isUser) {
+  const user = getUserScope();
+  const list = getHistory(logicalKey);
+  list.push({ author, text, isUser });
+  if (list.length > 60) list.splice(0, list.length - 60);
+  try {
+    sessionStorage.setItem(`sharolyot_chat_${user}_${logicalKey}`, JSON.stringify(list));
+  } catch { /* The in-memory history still works when storage is unavailable. */ }
+}
+
+function clearUserDialogueHistories() {
+  dialogueHistories = {};
+}
+
+function renderMessageElement(author, text, isUser) {
+  const div = document.createElement("div");
+  div.className = isUser ? "msg user" : "msg npc";
+  div.innerHTML = `<span class="author">${escapeHtml(author)}:</span> ${escapeHtml(text)}`;
+  npcDialogMessages.appendChild(div);
+  npcDialogMessages.scrollTop = npcDialogMessages.scrollHeight;
+}
+
 function requestNpcReply(message) {
   net.send("npc_talk", { npcId: chatNpcId, message, requestId: ++chatRequestId });
 }
@@ -169,11 +220,15 @@ function openChat(npcId, npcName) {
   // Фокус на поле ввода
   setTimeout(() => npcDialogInput.focus(), 60);
 
-  // Отправляем первое приветственное сообщение
-  addMessage("Вы", "Привет!", true);
-  chatWaiting = true;
-  showThinking();
-  requestNpcReply("Привет!");
+  const history = getHistory(getLogicalNpcKey(npcId));
+  if (history.length) {
+    for (const message of history) renderMessageElement(message.author, message.text, message.isUser);
+  } else {
+    addMessage("Вы", "Привет!", true);
+    chatWaiting = true;
+    showThinking();
+    requestNpcReply("Привет!");
+  }
 }
 
 // restoreLock=false во время logout (stopGame) — там мы уходим на экран
@@ -201,11 +256,8 @@ function addMessage(author, text, isUser) {
   // Убираем "думает..." если есть
   removeThinking();
 
-  const div = document.createElement("div");
-  div.className = isUser ? "msg user" : "msg npc";
-  div.innerHTML = `<span class="author">${escapeHtml(author)}:</span> ${escapeHtml(text)}`;
-  npcDialogMessages.appendChild(div);
-  npcDialogMessages.scrollTop = npcDialogMessages.scrollHeight;
+  renderMessageElement(author, text, isUser);
+  if (chatNpcId) appendToHistory(getLogicalNpcKey(chatNpcId), author, text, isUser);
 }
 
 function showThinking() {
@@ -380,6 +432,7 @@ function separateSpawn(position, room, roster = []) {
 net.on("welcome", (msg) => {
   myId = msg.playerId;
   myName = msg.name;
+  clearUserDialogueHistories();
   disconnected = false;
   enterChunk(msg.chunk, separateSpawn(msg.position, msg.chunk.room, msg.players), msg.players, msg.state);
 });
@@ -455,7 +508,7 @@ window.addEventListener("blur", clearMovementKeys);
 document.addEventListener("visibilitychange", () => { if (document.hidden) clearMovementKeys(); });
 
 renderer.domElement.addEventListener("click", () => {
-  if (!chatOpen) renderer.domElement.requestPointerLock();
+  if (!chatOpen && running && !paused) renderer.domElement.requestPointerLock();
 });
 
 let yaw = 0;
@@ -747,6 +800,7 @@ function stopGame() {
   for (const id of [...players.keys()]) removePlayerMesh(id);
   myId = null;
   myName = null;
+  clearUserDialogueHistories();
   disconnected = false;
 
   clearSession();
