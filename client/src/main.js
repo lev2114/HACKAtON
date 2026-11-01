@@ -700,10 +700,12 @@ function openPlayerChat() {
   if (!playerChatBarWrap || !playerChatInput) return;
   playerChatOpen = true;
   playerChatBarWrap.style.display = "block";
-  playerChatInput.value = "";
-  playerChatInput.focus();
-  if (document.pointerLockElement) document.exitPointerLock();
   clearMovementKeys();
+  if (document.pointerLockElement) document.exitPointerLock();
+  setTimeout(() => {
+    playerChatInput.value = "";
+    playerChatInput.focus();
+  }, 20);
 }
 
 function closePlayerChat() {
@@ -727,6 +729,20 @@ if (playerChatSend) {
   playerChatSend.addEventListener("click", () => sendPlayerChatMessage());
 }
 
+if (playerChatInput) {
+  playerChatInput.addEventListener("keydown", (e) => {
+    if (e.key === "Enter") {
+      e.preventDefault();
+      e.stopPropagation();
+      sendPlayerChatMessage();
+    } else if (e.key === "Escape") {
+      e.preventDefault();
+      e.stopPropagation();
+      closePlayerChat();
+    }
+  });
+}
+
 // --- движение: WASD + мышь (pointer lock) + прыжок (Space) ---
 const JUMP_SPEED = 5.2; // м/с начальная скорость прыжка
 const GRAVITY = 15.0;   // м/с² гравитация
@@ -736,6 +752,33 @@ let isJumping = false;
 
 const keys = {};
 window.addEventListener("keydown", (e) => {
+  // Нажатие Enter открывает или отправляет чат игроков
+  if (e.code === "Enter" || e.code === "NumpadEnter") {
+    if (!chatOpen && running && !paused) {
+      if (!playerChatOpen) {
+        e.preventDefault();
+        openPlayerChat();
+        return;
+      } else {
+        e.preventDefault();
+        sendPlayerChatMessage();
+        return;
+      }
+    }
+  }
+
+  // Нажатие Escape закрывает чат игроков
+  if (e.code === "Escape") {
+    if (playerChatOpen) {
+      e.preventDefault();
+      closePlayerChat();
+      return;
+    }
+  }
+
+  // Если чат игроков открыт — не даём ходить/прыгать
+  if (playerChatOpen) return;
+
   if (e.code === "Space") {
     if (!chatOpen && running && !paused && document.activeElement?.tagName !== "INPUT") {
       e.preventDefault();
@@ -745,7 +788,7 @@ window.addEventListener("keydown", (e) => {
       }
     }
   }
-  // Не перехватываем клавиши, если чат открыт и фокус на поле ввода
+  // Не перехватываем клавиши, если диалог NPC открыт и фокус на поле ввода
   if (chatOpen && document.activeElement === npcDialogInput) return;
   keys[e.code] = true;
 });
