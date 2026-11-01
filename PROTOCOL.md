@@ -102,7 +102,7 @@
 | `move`          | `x, y, z` (float)                 | обновляет позицию игрока, транслируется остальным в той же комнате |
 | `chunk_request` | `room` (string, id комнаты)       | игрок переходит в другую комнату, запрашивает её данные            |
 | `npc_talk`      | `npcId` (string), `message` (string) | игрок обращается к NPC                                          |
-| `pong`          | `id, fps, frameMs, memoryMB, drawCalls, triangles, paused, chatOpen` | ответ на серверный `ping` (метрики для админки) |
+| `pong`          | `id, fps, frameMs, memoryMB, drawCalls, triangles, paused, chatOpen, gpu` | ответ на серверный `ping` (метрики для админки) |
 
 ```json
 { "type": "move", "x": 1.2, "y": 1.6, "z": -4.0 }
@@ -263,7 +263,7 @@ and resets on server restart.
 
 | метод и путь | тело / ответ | что делает |
 |---|---|---|
-| `GET /api/admin/metrics` | `{server, clients[], doors[]}` | панель опрашивает раз в секунду: метрики сервера (аптайм, Go heap, горутины, LLM: запросы/ошибки/средняя задержка/в работе/ответы по шаблону), клиенты с `stats{pingMs, fps, frameMs, memoryMB, drawCalls, triangles, paused, chatOpen, droppedMessages}`, двери |
+| `GET /api/admin/metrics` | `{server, clients[], doors[]}` | панель опрашивает раз в секунду: метрики сервера (аптайм, Go heap, горутины, LLM: запросы/ошибки/средняя задержка/в работе/ответы по шаблону), клиенты с `stats{pingMs, fps, frameMs, memoryMB, drawCalls, triangles, paused, chatOpen, gpu, droppedMessages}`, двери |
 | `GET /api/admin/config` | `{settings, defaults, npcs[], rooms[], factBanks[]}` | всё редактируемое; у NPC — текущие поля, `profile` (правки), `defaults` (встроенные промпт/приветствие/оффтоп), `base` (из npcs.json) |
 | `PUT /api/admin/settings` | `{walkSpeed, sprintSpeed, llmEnabled, model, cleanersEnabled, cleanerSpeed}` | глобальные настройки, сразу рассылает `settings` игрокам |
 | `DELETE /api/admin/settings` | → настройки | сброс к исходным |
