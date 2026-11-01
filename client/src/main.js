@@ -407,6 +407,8 @@ async function enterChunk(chunk, teleport, roster, sharedState) {
       pitch = 0;
     }
   }
+  isJumping = false;
+  verticalVelocity = 0;
   net.send("move", { x: camera.position.x, y: camera.position.y, z: camera.position.z });
   if (chatOpen) closeChat();
 
@@ -536,9 +538,24 @@ net.on("error", (msg) => {
   }
 });
 
-// --- движение: WASD + мышь (pointer lock) ---
+// --- движение: WASD + мышь (pointer lock) + прыжок (Space) ---
+const JUMP_SPEED = 5.2; // м/с начальная скорость прыжка
+const GRAVITY = 15.0;   // м/с² гравитация
+const EYE_HEIGHT = 1.6;
+let verticalVelocity = 0;
+let isJumping = false;
+
 const keys = {};
 window.addEventListener("keydown", (e) => {
+  if (e.code === "Space") {
+    if (!chatOpen && running && !paused && document.activeElement?.tagName !== "INPUT") {
+      e.preventDefault();
+      if (!isJumping) {
+        verticalVelocity = JUMP_SPEED;
+        isJumping = true;
+      }
+    }
+  }
   // Не перехватываем клавиши, если чат открыт и фокус на поле ввода
   if (chatOpen && document.activeElement === npcDialogInput) return;
   keys[e.code] = true;
@@ -818,8 +835,27 @@ function tick() {
 
     if (currentRoomBuilt?.ready && !pendingRoomId && !disconnected) {
       const previousPosition = camera.position.clone();
-      if (currentRoomBuilt.collision) currentRoomBuilt.collision.move(camera.position, move);
+      if (currentRoomBuilt.collision) currentRoomBuilt.collision.move(camera.position, move, isJumping);
       else camera.position.add(move);
+
+      if (isJumping) {
+        verticalVelocity -= GRAVITY * dt;
+        camera.position.y += verticalVelocity * dt;
+
+        const feetY = camera.position.y - EYE_HEIGHT;
+        let floorY = null;
+        if (currentRoomBuilt.collision?.getFloor) {
+          floorY = currentRoomBuilt.collision.getFloor(camera.position.x, camera.position.z, feetY);
+        }
+        const groundY = (floorY !== null ? floorY : 0) + EYE_HEIGHT;
+
+        if (camera.position.y <= groundY && verticalVelocity <= 0) {
+          camera.position.y = groundY;
+          verticalVelocity = 0;
+          isJumping = false;
+        }
+      }
+
       const resolved = resolveCollision(currentRoomBuilt.room, currentRoomBuilt.neighbors, camera.position.x, camera.position.z);
       camera.position.x = resolved.x;
       camera.position.z = resolved.z;
@@ -863,6 +899,8 @@ function stopGame() {
   clearMovementKeys();
   running = false;
   paused = false;
+  isJumping = false;
+  verticalVelocity = 0;
   if (chatOpen) closeChat(false);
   net.disconnect();
   if (document.pointerLockElement) document.exitPointerLock();

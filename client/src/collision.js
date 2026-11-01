@@ -51,6 +51,26 @@ export function createRoomCollision(root, npcMeshes = {}, extraRoots = []) {
     return floor;
   }
 
+  function findFloorBelow(x, z, feetY) {
+    origin.set(x, feetY + 0.5, z);
+    ray.set(origin, DOWN);
+    ray.far = 15.0;
+    let floor = null;
+    for (const { mesh, box } of surfaces) {
+      if (x < box.min.x || x > box.max.x || z < box.min.z || z > box.max.z) continue;
+      for (const hit of ray.intersectObject(mesh, false)) {
+        normalMatrix.getNormalMatrix(mesh.matrixWorld);
+        normal.copy(hit.face.normal).applyMatrix3(normalMatrix).normalize();
+        if (normal.y > 0.7 && (floor === null || hit.point.y > floor)) {
+          if (hit.point.y <= feetY + 0.3) {
+            floor = hit.point.y;
+          }
+        }
+      }
+    }
+    return floor;
+  }
+
   function blocked(from, to, floor) {
     for (const npc of Object.values(npcMeshes)) {
       if (Math.abs(to.y - npc.position.y) < 1.5 &&
@@ -95,17 +115,24 @@ export function createRoomCollision(root, npcMeshes = {}, extraRoots = []) {
     return ray.intersectObjects(nearby, false).length > 0;
   }
 
-  function tryStep(position, dx, dz) {
-    const floor = floorAt(position.x + dx, position.z + dz, position.y - EYE_HEIGHT);
-    // A missing/too-low floor is an edge: stay behind the gallery railing.
-    if (floor === null) return false;
-    candidate.set(position.x + dx, floor + EYE_HEIGHT, position.z + dz);
-    if (blocked(position, candidate, floor)) return false;
+  function tryStep(position, dx, dz, isAirborne = false) {
+    const feetY = position.y - EYE_HEIGHT;
+    const floor = floorAt(position.x + dx, position.z + dz, feetY);
+    // A missing/too-low floor is an edge: stay behind the gallery railing when walking.
+    if (!isAirborne && floor === null) return false;
+    const effFloor = floor !== null ? floor : (findFloorBelow(position.x + dx, position.z + dz, feetY) ?? 0);
+    candidate.set(position.x + dx, isAirborne ? position.y : (effFloor + EYE_HEIGHT), position.z + dz);
+    if (blocked(position, candidate, effFloor)) return false;
     position.copy(candidate);
     return true;
   }
 
   return {
+    getFloor(x, z, feetY) {
+      const f = floorAt(x, z, feetY);
+      if (f !== null) return f;
+      return findFloorBelow(x, z, feetY);
+    },
     cleanerFloor(x, z, feetY, radius = 0.25, height = 0.22) {
       const floor = floorAt(x, z, feetY);
       if (floor === null || Math.abs(floor - feetY) > 0.06) return null;
@@ -128,20 +155,25 @@ export function createRoomCollision(root, npcMeshes = {}, extraRoots = []) {
       }
       return floor;
     },
-    move(position, delta) {
-      const floor = floorAt(position.x, position.z, position.y - EYE_HEIGHT);
-      if (floor !== null) position.y = floor + EYE_HEIGHT;
+    move(position, delta, isAirborne = false) {
+      if (!isAirborne) {
+        const floor = floorAt(position.x, position.z, position.y - EYE_HEIGHT);
+        if (floor !== null) position.y = floor + EYE_HEIGHT;
+      }
       // A roster offset or a saved position can be inside newly added furniture.
-      if (needsPlacement && floor !== null && blocked(position, position, floor)) {
-        placement: for (let radius = 0.5; radius <= 3; radius += 0.5) {
-          for (const radial of radialDirections) {
-            candidate.copy(position).addScaledVector(radial, radius);
-            const nearbyFloor = floorAt(candidate.x, candidate.z, floor);
-            if (nearbyFloor === null) continue;
-            candidate.y = nearbyFloor + EYE_HEIGHT;
-            if (!blocked(candidate, candidate, nearbyFloor)) {
-              position.copy(candidate);
-              break placement;
+      if (needsPlacement) {
+        const floor = floorAt(position.x, position.z, position.y - EYE_HEIGHT);
+        if (floor !== null && blocked(position, position, floor)) {
+          placement: for (let radius = 0.5; radius <= 3; radius += 0.5) {
+            for (const radial of radialDirections) {
+              candidate.copy(position).addScaledVector(radial, radius);
+              const nearbyFloor = floorAt(candidate.x, candidate.z, floor);
+              if (nearbyFloor === null) continue;
+              candidate.y = nearbyFloor + EYE_HEIGHT;
+              if (!blocked(candidate, candidate, nearbyFloor)) {
+                position.copy(candidate);
+                break placement;
+              }
             }
           }
         }
@@ -151,10 +183,10 @@ export function createRoomCollision(root, npcMeshes = {}, extraRoots = []) {
       if (!steps) return;
       const dx = delta.x / steps, dz = delta.z / steps;
       for (let i = 0; i < steps; i++) {
-        if (!tryStep(position, dx, dz)) {
+        if (!tryStep(position, dx, dz, isAirborne)) {
           // Sliding along a wall also makes the curved staircase forgiving.
-          if (dx) tryStep(position, dx, 0);
-          if (dz) tryStep(position, 0, dz);
+          if (dx) tryStep(position, dx, 0, isAirborne);
+          if (dz) tryStep(position, 0, dz, isAirborne);
         }
       }
     },
