@@ -57,13 +57,38 @@ type Responder struct {
 // New builds a Responder. Pass ollamaURL = "" to disable the LLM entirely
 // and always use the FSM fallback (useful for a low-powered demo laptop).
 func New(ollamaURL, model string) *Responder {
-	return &Responder{
+	r := &Responder{
 		ollamaURL: ollamaURL,
 		model:     model,
-		client:    &http.Client{Timeout: 10 * time.Second},
+		client:    &http.Client{Timeout: 35 * time.Second},
 		sem:       make(chan struct{}, 2), // at most 2 concurrent Ollama requests
 		states:    make(map[string]State),
 	}
+
+	// Warm up model in background so the first in-game query doesn't stall on load
+	if ollamaURL != "" {
+		go r.warmup()
+	}
+
+	return r
+}
+
+func (r *Responder) warmup() {
+	log.Printf("ai: прогрев модели Ollama (%s)...", r.model)
+	body, _ := json.Marshal(ollamaRequest{Model: r.model, Prompt: "Привет", Stream: false})
+	req, err := http.NewRequest(http.MethodPost, r.ollamaURL+"/api/generate", bytes.NewReader(body))
+	if err != nil {
+		log.Printf("ai: warmup request error: %v", err)
+		return
+	}
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := r.client.Do(req)
+	if err != nil {
+		log.Printf("ai: warmup warning (Ollama недоступна?): %v", err)
+		return
+	}
+	defer resp.Body.Close()
+	log.Printf("ai: модель Ollama (%s) прогрета и загружена в память!", r.model)
 }
 
 func stateKey(playerID, npcID string) string {
@@ -92,6 +117,7 @@ var greetings = map[string]string{
 	"pin":     "Гутен таг. Я Пин, главный инженер. Ракеты, двигатели, история космонавтики — это всё ко мне. Спрашивай, буду краток.",
 	"nyusha":  "Ой, привет! Я Нюша, биолог-садовод станции. Знаешь, в космосе столько интересного про тело и растения! Спрашивай, я расскажу!",
 	"sovunya": "Здравствуй, дорогой! Я Совунья, врач станции. Здоровье космонавтов — моя забота. Если хочешь узнать, как тело ведёт себя в космосе — спрашивай!",
+	"karich":  "Приветствую, юный исследователь. Я Кар-Карыч. В космосе много тайн, и я готов поделиться своим богатым жизненным опытом!",
 }
 
 // Reply returns the line an NPC says. It drives the FSM through states:
@@ -100,17 +126,19 @@ var greetings = map[string]string{
 func (r *Responder) Reply(ctx context.Context, npc world.NPC, fact *world.Fact, playerMessage string, repeat bool, availableTopics []string, playerID string) string {
 	state := r.getState(playerID, npc.ID)
 
-	switch state {
-	case Greeting:
-		// First interaction — greet and transition to Telling
+	if state == Greeting {
 		r.setState(playerID, npc.ID, Telling)
-		if g, ok := greetings[npc.ID]; ok {
-			return g
+		msgLower := strings.TrimSpace(strings.ToLower(playerMessage))
+		// Если это просто открытие диалога ("Привет!"), сразу отдаём приветствие
+		if msgLower == "привет!" || msgLower == "привет" || msgLower == "" {
+			if g, ok := greetings[npc.ID]; ok {
+				return g
+			}
+			return fmt.Sprintf("Привет! Я %s, %s. Спрашивай о чём хочешь!", npc.Name, npc.Title)
 		}
-		return fmt.Sprintf("Привет! Я %s, %s. Спрашивай о чём хочешь!", npc.Name, npc.Title)
+	}
 
-	case Exhausted:
-		// All facts told
+	if state == Exhausted {
 		return "Кажется, я рассказал тебе всё, что знаю! Попробуй поговорить с кем-нибудь в другом отсеке станции."
 	}
 
@@ -128,10 +156,12 @@ func (r *Responder) Reply(ctx context.Context, npc world.NPC, fact *world.Fact, 
 
 	// Try Ollama first if available
 	if r.ollamaURL != "" {
+		log.Printf("ai: запрос к Ollama для %s по теме %q (вопрос: %q)", npc.Name, fact.Topic, playerMessage)
 		text, err := r.askOllama(ctx, npc, fact, playerMessage, repeat, availableTopics)
 		if err != nil {
 			log.Printf("ai: ollama error for %s→%s, falling back to FSM: %v", playerID, npc.ID, err)
 		} else {
+			log.Printf("ai: Ollama успешно сгенерировала ответ для %s", npc.Name)
 			return text
 		}
 	}
@@ -240,7 +270,7 @@ func (r *Responder) askOllama(ctx context.Context, npc world.NPC, fact *world.Fa
 		return "", ctx.Err()
 	}
 
-	ctx, cancel := context.WithTimeout(ctx, 8*time.Second)
+	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
 
 	repeatInstruction := ""
