@@ -112,12 +112,52 @@ const npcDialogMessages = document.getElementById("npc-dialog-messages");
 const npcDialogInput = document.getElementById("npc-dialog-input");
 const npcDialogSend = document.getElementById("npc-dialog-send");
 
-// ── NPC-диалог: состояние ──
+// ── NPC-диалог: состояние и память ──
 let chatOpen = false;       // открыт ли диалог
 let chatNpcId = null;       // id NPC, с которым говорим
 let chatNpcName = null;     // имя NPC
 let chatWaiting = false;    // ждём ответ от сервера
 let thinkingEl = null;      // элемент "думает..."
+
+// Логический ключ персонажа: у двух Совуний и двух Лосяшей общая память!
+function getLogicalNpcKey(npcId) {
+  if (npcId === "sovunya" || npcId === "sovunya_dining") return "sovunya";
+  if (npcId === "losyash" || npcId === "losyash_chemistry") return "losyash";
+  return npcId;
+}
+
+const dialogueHistories = {};
+
+function getHistory(logicalKey) {
+  if (!dialogueHistories[logicalKey]) {
+    try {
+      const stored = sessionStorage.getItem("sharolyot_chat_" + logicalKey);
+      dialogueHistories[logicalKey] = stored ? JSON.parse(stored) : [];
+    } catch {
+      dialogueHistories[logicalKey] = [];
+    }
+  }
+  return dialogueHistories[logicalKey];
+}
+
+function appendToHistory(logicalKey, author, text, isUser) {
+  const list = getHistory(logicalKey);
+  list.push({ author, text, isUser });
+  if (list.length > 60) {
+    list.splice(0, list.length - 60);
+  }
+  try {
+    sessionStorage.setItem("sharolyot_chat_" + logicalKey, JSON.stringify(list));
+  } catch {}
+}
+
+function renderMessageElement(author, text, isUser) {
+  const div = document.createElement("div");
+  div.className = isUser ? "msg user" : "msg npc";
+  div.innerHTML = `<span class="author">${escapeHtml(author)}:</span> ${escapeHtml(text)}`;
+  npcDialogMessages.appendChild(div);
+  npcDialogMessages.scrollTop = npcDialogMessages.scrollHeight;
+}
 
 function updateHud() {
   hud.textContent = disconnected
@@ -147,10 +187,22 @@ function openChat(npcId, npcName) {
 
   setTimeout(() => npcDialogInput.focus(), 60);
 
-  addMessage("Вы", "Привет!", true);
-  chatWaiting = true;
-  showThinking();
-  net.send("npc_talk", { npcId: chatNpcId, message: "Привет!" });
+  const logicalKey = getLogicalNpcKey(npcId);
+  const history = getHistory(logicalKey);
+
+  if (history && history.length > 0) {
+    // Подгружаем сохранённый диалог при повторном открытии меню
+    for (const msg of history) {
+      renderMessageElement(msg.author, msg.text, msg.isUser);
+    }
+    npcDialogMessages.scrollTop = npcDialogMessages.scrollHeight;
+  } else {
+    // Первое общение с персонажем — отправляем приветствие
+    addMessage("Вы", "Привет!", true);
+    chatWaiting = true;
+    showThinking();
+    net.send("npc_talk", { npcId: chatNpcId, message: "Привет!" });
+  }
 }
 
 function closeChat() {
@@ -171,11 +223,11 @@ function closeChat() {
 
 function addMessage(author, text, isUser) {
   removeThinking();
-  const div = document.createElement("div");
-  div.className = isUser ? "msg user" : "msg npc";
-  div.innerHTML = `<span class="author">${escapeHtml(author)}:</span> ${escapeHtml(text)}`;
-  npcDialogMessages.appendChild(div);
-  npcDialogMessages.scrollTop = npcDialogMessages.scrollHeight;
+  renderMessageElement(author, text, isUser);
+  if (chatNpcId) {
+    const logicalKey = getLogicalNpcKey(chatNpcId);
+    appendToHistory(logicalKey, author, text, isUser);
+  }
 }
 
 function showThinking() {
@@ -218,6 +270,9 @@ npcDialogInput.addEventListener("keydown", (e) => {
   if (e.key === "Enter") {
     e.preventDefault();
     sendPlayerMessage();
+  } else if (e.key === "Escape") {
+    e.preventDefault();
+    closeChat();
   }
   e.stopPropagation();
 });
