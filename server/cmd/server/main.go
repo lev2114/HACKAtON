@@ -31,7 +31,7 @@ func main() {
 
 	// Пусто = ИИ сразу идёт в FSM-фоллбэк, без похода к Ollama.
 	ollamaURL := os.Getenv("OLLAMA_URL")
-	model := getenv("OLLAMA_MODEL", "qwen2.5:3b")
+	model := getenv("OLLAMA_MODEL", "qwen2.5:7b")
 
 	w, err := world.Load(worldDir)
 	if err != nil {
@@ -58,7 +58,7 @@ func main() {
 		log.Fatalf("не удалось подготовить TLS-сертификат: %v", err)
 	}
 
-	log.Printf("Шаролёт слушает на https://%s (world=%s, ollama=%q)", addr, worldDir, ollamaURL)
+	log.Printf("Шаролёт слушает на https://%s (world=%s, ollama=%q, model=%q)", addr, worldDir, ollamaURL, model)
 	// No CORS headers: Vite's dev/preview proxy forwards /api and /ws to Go
 	// server-side (vite.config.js), so the browser only ever talks to the
 	// page's own origin — there's no legitimate cross-origin browser request

@@ -101,7 +101,22 @@ function clearSession() {
 }
 
 const hud = document.getElementById("hud");
-const chatBox = document.getElementById("chat");
+
+// ── NPC-диалог: DOM-элементы ──
+const npcHint = document.getElementById("npc-hint");
+const npcDialog = document.getElementById("npc-dialog");
+const npcDialogHeader = npcDialog.querySelector(".npc-title");
+const npcDialogClose = npcDialog.querySelector(".close-btn");
+const npcDialogMessages = document.getElementById("npc-dialog-messages");
+const npcDialogInput = document.getElementById("npc-dialog-input");
+const npcDialogSend = document.getElementById("npc-dialog-send");
+
+// ── NPC-диалог: состояние ──
+let chatOpen = false; // открыт ли диалог
+let chatNpcId = null; // id NPC, с которым говорим
+let chatNpcName = null; // имя NPC
+let chatWaiting = false; // ждём ответ от сервера
+let thinkingEl = null; // элемент "думает..."
 
 function updateHud() {
   hud.textContent = disconnected
@@ -112,9 +127,129 @@ function updateHud() {
       : `${myName} · ${currentRoomBuilt.room.name} · Игроков в комнате: ${players.size + 1}`);
 }
 
+// ── Открытие / закрытие диалога ──
+
+function openChat(npcId, npcName) {
+  chatOpen = true;
+  chatNpcId = npcId;
+  chatNpcName = npcName;
+  chatWaiting = false;
+
+  npcDialogHeader.textContent = npcName;
+  npcDialogMessages.innerHTML = "";
+  npcDialog.style.display = "flex";
+  npcHint.style.display = "none";
+
+  // Разблокируем курсор, чтобы можно было печатать
+  if (document.pointerLockElement) {
+    document.exitPointerLock();
+  }
+
+  // Фокус на поле ввода
+  setTimeout(() => npcDialogInput.focus(), 60);
+
+  // Отправляем первое приветственное сообщение
+  addMessage("Вы", "Привет!", true);
+  chatWaiting = true;
+  showThinking();
+  net.send("npc_talk", { npcId: chatNpcId, message: "Привет!" });
+}
+
+// restoreLock=false во время logout (stopGame) — там мы уходим на экран
+// входа, а не возвращаемся в игру, так что захватывать курсор не нужно.
+function closeChat(restoreLock = true) {
+  chatOpen = false;
+  chatNpcId = null;
+  chatNpcName = null;
+  chatWaiting = false;
+  thinkingEl = null;
+
+  npcDialog.style.display = "none";
+  npcDialogInput.value = "";
+  npcDialogInput.blur();
+
+  if (restoreLock) renderer.domElement.requestPointerLock();
+}
+
+// ── Сообщения в чате ──
+
+function addMessage(author, text, isUser) {
+  // Убираем "думает..." если есть
+  removeThinking();
+
+  const div = document.createElement("div");
+  div.className = isUser ? "msg user" : "msg npc";
+  div.innerHTML = `<span class="author">${escapeHtml(author)}:</span> ${escapeHtml(text)}`;
+  npcDialogMessages.appendChild(div);
+  npcDialogMessages.scrollTop = npcDialogMessages.scrollHeight;
+}
+
+function showThinking() {
+  removeThinking();
+  thinkingEl = document.createElement("div");
+  thinkingEl.className = "msg thinking";
+  thinkingEl.textContent = `${chatNpcName} думает…`;
+  npcDialogMessages.appendChild(thinkingEl);
+  npcDialogMessages.scrollTop = npcDialogMessages.scrollHeight;
+}
+
+function removeThinking() {
+  if (thinkingEl && thinkingEl.parentNode) {
+    thinkingEl.parentNode.removeChild(thinkingEl);
+  }
+  thinkingEl = null;
+}
+
+function escapeHtml(str) {
+  const div = document.createElement("div");
+  div.textContent = str;
+  return div.innerHTML;
+}
+
+// ── Отправка сообщения игрока ──
+
+function sendPlayerMessage() {
+  const text = npcDialogInput.value.trim();
+  if (!text || !chatOpen || chatWaiting) return;
+
+  addMessage("Вы", text, true);
+  npcDialogInput.value = "";
+
+  chatWaiting = true;
+  showThinking();
+  net.send("npc_talk", { npcId: chatNpcId, message: text });
+}
+
+npcDialogSend.addEventListener("click", sendPlayerMessage);
+
+npcDialogInput.addEventListener("keydown", (e) => {
+  if (e.key === "Enter") {
+    e.preventDefault();
+    sendPlayerMessage();
+  } else if (e.code === "Escape") {
+    // Поле ввода автофокусится при открытии чата, так что это самый частый
+    // путь — stopPropagation ниже не даёт событию дойти до window-обработчика,
+    // поэтому закрываем прямо здесь, а не полагаемся на всплытие.
+    e.preventDefault();
+    closeChat();
+  }
+  // Не даём клавишам WASD/E улетать в game-обработчики
+  e.stopPropagation();
+});
+
+npcDialogClose.addEventListener("click", closeChat);
+
+// Отвечает NPC в открытом диалоге. Если пришёл ответ, а диалог уже закрыт
+// (игрок ушёл/вышел раньше) — просто игнорируем, без отдельного UI.
 function showChat(name, text) {
-  chatBox.style.display = "block";
-  chatBox.innerHTML = `<span class="name">${name}:</span>${text}`;
+  if (chatOpen && chatNpcId) {
+    removeThinking();
+    addMessage(name, text, false);
+    chatWaiting = false;
+    npcDialogInput.disabled = false;
+    npcDialogSend.disabled = false;
+    setTimeout(() => npcDialogInput.focus(), 30);
+  }
 }
 
 // Канвас-текстура с именем, billboard (THREE.Sprite всегда смотрит на
@@ -187,7 +322,7 @@ async function enterChunk(chunk, teleport, roster) {
     }
   }
   net.send("move", { x: camera.position.x, y: camera.position.y, z: camera.position.z });
-  chatBox.style.display = "none";
+  if (chatOpen) closeChat();
 
   // Кто уже стоял в комнате до нас — player_joined присылается только за
   // события ПОСЛЕ нашего входа, без ростера мы бы их никогда не увидели.
@@ -260,14 +395,27 @@ net.on("error", (msg) => {
   pendingRoomId = null;
   fromRoomForTransition = null;
   console.warn("server error:", msg.code, msg.message);
+  // Если ждали ответ NPC — снимаем "думает"
+  if (chatWaiting) {
+    removeThinking();
+    chatWaiting = false;
+  }
 });
 
 // --- движение: WASD + мышь (pointer lock) ---
 const keys = {};
-window.addEventListener("keydown", (e) => (keys[e.code] = true));
-window.addEventListener("keyup", (e) => (keys[e.code] = false));
+window.addEventListener("keydown", (e) => {
+  // Не перехватываем клавиши, если чат открыт и фокус на поле ввода
+  if (chatOpen && document.activeElement === npcDialogInput) return;
+  keys[e.code] = true;
+});
+window.addEventListener("keyup", (e) => {
+  keys[e.code] = false;
+});
 
-renderer.domElement.addEventListener("click", () => renderer.domElement.requestPointerLock());
+renderer.domElement.addEventListener("click", () => {
+  if (!chatOpen) renderer.domElement.requestPointerLock();
+});
 
 let yaw = 0;
 let pitch = 0;
@@ -292,10 +440,17 @@ function findNearestNpc() {
   return closest && closest.dist < 3 ? closest : null;
 }
 
+// Нажатие E — открыть диалог с ближайшим NPC
 window.addEventListener("keydown", (e) => {
+  // Не реагируем на E, если чат уже открыт (чтобы можно было набирать букву "е")
+  if (chatOpen) return;
   if (e.code !== "KeyE") return;
+
   const near = findNearestNpc();
-  if (near) net.send("npc_talk", { npcId: near.id, message: "Расскажи что-нибудь интересное" });
+  if (near) {
+    const displayName = near.npc?.name || near.id;
+    openChat(near.id, displayName);
+  }
 });
 
 // Стены комнаты блокируют камеру, КРОМЕ узкого "проёма" в направлении
@@ -465,7 +620,7 @@ function tick() {
 
   const dt = Math.min(clock.getDelta(), 0.05);
 
-  if (!paused) {
+  if (!paused && !chatOpen) {
     camera.rotation.y = yaw;
     camera.rotation.x = pitch;
 
@@ -489,6 +644,9 @@ function tick() {
       maybeAutoEnterNeighbor();
     }
     updateHud();
+
+    // Подсказка [E] Поговорить — показывается, когда рядом NPC и чат закрыт
+    npcHint.style.display = findNearestNpc() ? "block" : "none";
 
     const now = performance.now();
     if (now - lastSentAt > 50) {
@@ -526,7 +684,7 @@ function stopGame() {
   myId = null;
   myName = null;
   disconnected = false;
-  chatBox.style.display = "none";
+  if (chatOpen) closeChat(false);
 
   clearSession();
   pauseEl.hidden = true;
@@ -610,7 +768,14 @@ document.getElementById("pause-resume").addEventListener("click", () => {
 document.getElementById("pause-exit").addEventListener("click", stopGame);
 
 window.addEventListener("keydown", (e) => {
-  if (e.code !== "Escape" || !running) return;
+  if (e.code !== "Escape") return;
+  // Открытый диалог с NPC закрывается первым и не открывает паузу поверх него.
+  if (chatOpen) {
+    e.preventDefault();
+    closeChat();
+    return;
+  }
+  if (!running) return;
   paused = !paused;
   pauseEl.hidden = !paused;
   if (!paused) renderer.domElement.requestPointerLock();

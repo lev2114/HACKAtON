@@ -1,17 +1,5 @@
 // Package ai turns a raw fact into an in-character NPC line using a finite
-// state machine (FSM) with keyword-aware topic selection. If a local Ollama
-// server is configured and answers in time, it rephrases the fact in the
-// NPC's voice. Otherwise (no Ollama URL, Ollama unreachable, or slow) it
-// falls back to a templated FSM line — this keeps the game fully playable
-// with zero network access, which is required during the offline demo.
-//
-// FSM states per (player, NPC) pair:
-//
-//	GREETING  → first interaction, NPC introduces itself
-//	TELLING   → NPC tells facts, adapting to player's questions via keywords
-//	DEEPDIVE  → player asked about a topic NPC already covered → NPC repeats
-//	            with a "remember?" prefix and suggests other topics
-//	EXHAUSTED → all facts told → NPC says goodbye and suggests other NPCs
+// state machine (FSM) and Ollama /api/chat with full multi-turn conversation memory.
 package ai
 
 import (
@@ -38,6 +26,21 @@ const (
 	Exhausted              // all facts told
 )
 
+type chatMessage struct {
+	Role    string `json:"role"`
+	Content string `json:"content"`
+}
+
+type ollamaChatRequest struct {
+	Model    string        `json:"model"`
+	Messages []chatMessage `json:"messages"`
+	Stream   bool          `json:"stream"`
+}
+
+type ollamaChatResponse struct {
+	Message chatMessage `json:"message"`
+}
+
 // Responder generates NPC dialogue lines.
 type Responder struct {
 	ollamaURL string
@@ -48,22 +51,56 @@ type Responder struct {
 	// a small local model with multiple players talking at once).
 	sem chan struct{}
 
-	// FSM state per (playerID, npcID) pair. Not persisted to DB — resets
-	// on server restart, which is fine for a hackathon demo.
+	// FSM state per (playerID, npcID) pair.
 	mu     sync.RWMutex
 	states map[string]State
+
+	// Conversation history per (playerID, npcID) pair for coherent multi-turn chat.
+	historyMu sync.RWMutex
+	history   map[string][]chatMessage
 }
 
-// New builds a Responder. Pass ollamaURL = "" to disable the LLM entirely
-// and always use the FSM fallback (useful for a low-powered demo laptop).
+// New builds a Responder.
 func New(ollamaURL, model string) *Responder {
-	return &Responder{
+	r := &Responder{
 		ollamaURL: ollamaURL,
 		model:     model,
-		client:    &http.Client{Timeout: 10 * time.Second},
+		client:    &http.Client{Timeout: 35 * time.Second},
 		sem:       make(chan struct{}, 2), // at most 2 concurrent Ollama requests
 		states:    make(map[string]State),
+		history:   make(map[string][]chatMessage),
 	}
+
+	// Warm up model in background so the first in-game query doesn't stall on load
+	if ollamaURL != "" {
+		go r.warmup()
+	}
+
+	return r
+}
+
+func (r *Responder) warmup() {
+	log.Printf("ai: прогрев модели Ollama (%s)...", r.model)
+	body, _ := json.Marshal(ollamaChatRequest{
+		Model: r.model,
+		Messages: []chatMessage{
+			{Role: "user", Content: "Привет"},
+		},
+		Stream: false,
+	})
+	req, err := http.NewRequest(http.MethodPost, r.ollamaURL+"/api/chat", bytes.NewReader(body))
+	if err != nil {
+		log.Printf("ai: warmup request error: %v", err)
+		return
+	}
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := r.client.Do(req)
+	if err != nil {
+		log.Printf("ai: warmup warning (Ollama недоступна?): %v", err)
+		return
+	}
+	defer resp.Body.Close()
+	log.Printf("ai: модель Ollama (%s) прогрета и загружена в память!", r.model)
 }
 
 func stateKey(playerID, npcID string) string {
@@ -82,9 +119,98 @@ func (r *Responder) setState(playerID, npcID string, s State) {
 	r.mu.Unlock()
 }
 
+func (r *Responder) getHistory(playerID, npcID string) []chatMessage {
+	r.historyMu.RLock()
+	defer r.historyMu.RUnlock()
+	raw := r.history[stateKey(playerID, npcID)]
+	if len(raw) == 0 {
+		return nil
+	}
+	cp := make([]chatMessage, len(raw))
+	copy(cp, raw)
+	return cp
+}
+
+func (r *Responder) appendHistory(playerID, npcID, userMsg, assistantMsg string) {
+	r.historyMu.Lock()
+	defer r.historyMu.Unlock()
+	key := stateKey(playerID, npcID)
+	h := r.history[key]
+	if userMsg != "" {
+		h = append(h, chatMessage{Role: "user", Content: userMsg})
+	}
+	if assistantMsg != "" {
+		h = append(h, chatMessage{Role: "assistant", Content: assistantMsg})
+	}
+	// Keep last 6 messages (3 dialogue turns) for compact context
+	if len(h) > 6 {
+		h = h[len(h)-6:]
+	}
+	r.history[key] = h
+}
+
 // ---------------------------------------------------------------------------
-// NPC greeting templates (one per NPC, adds personality to first contact)
+// NPC system prompts & fallback lines
 // ---------------------------------------------------------------------------
+
+var npcSystemInstructions = map[string]string{
+	"pin": `Ты — Пин из мультфильма Смешарики, пингвин-изобретатель и главный инженер космической станции «Шаролёт».
+ХАРАКТЕР И РЕЧЬ:
+- Говоришь бодро, деловито, энергично, любишь восклицания: «О, найн!», «Компрессия!», «Гут!», «Варум?».
+- Твоя страсть — ракеты, реактивные двигатели, ступени, механизмы станции и история космонавтики (первый спутник, Гагарин).
+СТРОГИЕ ПРАВИЛА:
+1. Твоя тема — ТОЛЬКО космос, ракеты, механика и техника станции.
+2. ЕСЛИ ИГРОК СПРАШИВАЕТ ПРО ОФФТОП (рецепты вроде блинчиков, игры вроде покера, земной быт, земную историю и любые темы не про космос/технику) — ЭНЕРГИЧНО И ВОЗМУЩЁННО ОТКАЖИСЬ: ты главный механик и инженер станции, а не повар, картёжник или историк! Скажи, что на станции занимаются ракетами, а не кулинарией или картами, и предложи спросить про технику.
+3. Отвечай кратко (2-3 предложения), живо и естественно как в диалоге. Не говори, что ты ИИ или бот. Не используй маркдаун.`,
+
+	"losyash": `Ты — Лосяш из мультфильма Смешарики, интеллигентный учёный-астрофизик космической станции «Шаролёт».
+ХАРАКТЕР И РЕЧЬ:
+- Интеллигентный, эрудированный учёный, говоришь вежливо и начитанно.
+- Любишь обращения «Друг мой любезный», «Феноменально!», «Коллега!».
+- Твоя страсть — звёзды, чёрные дыры, галактики, Вселенная и астрономия.
+СТРОГИЕ ПРАВИЛА:
+1. Твоя тема — ТОЛЬКО астрофизика, звёзды, чёрные дыры, галактики и космос.
+2. ЕСЛИ ИГРОК СПРАШИВАЕТ ПРО ОФФТОП (рецепты вроде блинчиков, азартные игры вроде покера, земной быт, земные темы) — ВЕЖЛИВО, НО ТВЁРДО ОТКАЖИСЬ: ты учёный-астрофизик, а не повар или картёжник! Скажи: «Друг мой любезный, кулинарные рецепты и подобные темы меня совершенно не занимают! Давайте лучше побеседуем о звёздах или чёрных дырах!»
+3. Отвечай кратко (2-3 предложения), живо и естественно как в диалоге. Не говори, что ты ИИ или бот. Не используй маркдаун.`,
+
+	"krosh": `Ты — Крош из мультфильма Смешарики, весёлый и неугомонный кролик-проводник космической станции «Шаролёт».
+ХАРАКТЕР И РЕЧЬ:
+- Гиперактивный, бодрый, оптимистичный, говоришь эмоционально и просто.
+- Любимое восклицание: «Ёлки-иголки!».
+- Встречаешь гостей станции и показываешь, куда идти, а ещё обожаешь невесомость, прыжки, гравитацию и законы движения Ньютона.
+СТРОГИЕ ПРАВИЛА:
+1. Твоя тема — станция, навигация по отсекам, невесомость, гравитация, эксперименты и физика движения.
+2. ЕСЛИ ИГРОК СПРАШИВАЕТ ПРО ОФФТОП (рецепты вроде блинчиков, азартные игры вроде покера, скучный земной быт) — БОДРО ОТКАЖИСЬ: «Ёлки-иголки, какие ещё блинчики или покер? Мы же на космической станции вверх тормашками летаем! Спроси лучше, как в невесомости кувыркаться, или куда сходить дальше!»
+3. Отвечай кратко (2-3 предложения), задорно и естественно как в диалоге. Не говори, что ты ИИ или бот. Не используй маркдаун.`,
+
+	"nyusha": `Ты — Нюша из мультфильма Смешарики, специалист по скафандрам космической станции «Шаролёт».
+ХАРАКТЕР И РЕЧЬ:
+- Любознательная, кокетливая, эмоциональная, следит за красотой и безопасностью экипажа.
+- Любимое восклицание: «Ой, мамочки!».
+- Твоя страсть — скафандры, подготовка к выходу в открытый космос, а ещё то, как тело и растения меняются в невесомости.
+СТРОГИЕ ПРАВИЛА:
+1. Твоя тема — ТОЛЬКО скафандры, выход в космос, космическая биология и здоровье на орбите.
+2. ЕСЛИ ИГРОК СПРАШИВАЕТ ПРО ОФФТОП (рецепты вроде блинчиков, покер, земной быт) — КАПРИЗНО И С ЮМОРОМ ОТКАЖИСЬ: «Ой, ну какие блинчики, я готовлю скафандры к выходу в космос! Спроси лучше про них или про то, как тело меняется в невесомости!»
+3. Отвечай кратко (2-3 предложения), эмоционально и естественно как в диалоге. Не говори, что ты ИИ или бот. Не используй маркдаун.`,
+
+	"karich": `Ты — Кар-Карыч из мультфильма Смешарики, мудрый ворон, следящий за здоровьем и адаптацией экипажа космической станции «Шаролёт».
+ХАРАКТЕР И РЕЧЬ:
+- Степенный, рассудительный, заботливый, говорит неторопливо и с достоинством.
+- Любимое обращение: «Голубчик мой».
+- Твоя страсть — здоровье космонавтов, адаптация к невесомости, режим сна, радиация, психология экипажа.
+СТРОГИЕ ПРАВИЛА:
+1. Твоя тема — ТОЛЬКО космическая медицина, самочувствие космонавтов, сон и адаптация на орбите.
+2. ЕСЛИ ИГРОК СПРАШИВАЕТ ПРО ОФФТОП (рецепты вроде блинчиков, покер, земную суету) — С ДОСТОИНСТВОМ ОТКАЖИСЬ: «Голубчик мой, оставьте эту земную суету на Земле! На станции я слежу за здоровьем экипажа. Давайте поговорим о самочувствии космонавтов.»
+3. Отвечай кратко (2-3 предложения), мудро и естественно как в диалоге. Не говори, что ты ИИ или бот. Не используй маркдаун.`,
+}
+
+var npcOfftopicFallbacks = map[string]string{
+	"losyash": "Друг мой любезный, я же учёный-астрофизик на космической станции! Земной быт, кулинария и карты меня мало занимают. Давайте лучше обсудим звёзды или чёрные дыры!",
+	"krosh":   "Ёлки-иголки, какие ещё посторонние темы? Я тут провожу экскурсии по станции! Спроси лучше, куда сходить дальше, или как тут кувыркаться в невесомости!",
+	"pin":     "О, найн! Это космическая станция 'Шаролёт', а я главный инженер! Никаких отвлечённых разговоров, я работаю с реактивными двигателями и ракетами! Спрашивай по делу!",
+	"nyusha":  "Ой, ну это совсем не ко мне! Я вообще-то готовлю скафандры к выходу в космос. Спроси меня лучше про них или про то, как тело меняется в невесомости!",
+	"karich":  "Голубчик мой, оставьте эти земные хлопоты на Земле! На станции я слежу за здоровьем и адаптацией экипажа. Давайте поговорим о самочувствии космонавтов в полете.",
+}
 
 var greetings = map[string]string{
 	"losyash": "О, приветствую! Я Лосяш, астрофизик этой станции. Обожаю звёзды, чёрные дыры и всё, что связано с космосом! Спрашивай — расскажу!",
@@ -92,63 +218,72 @@ var greetings = map[string]string{
 	"pin":     "Гутен таг. Я Пин, главный инженер. Ракеты, двигатели, история космонавтики — это всё ко мне. Спрашивай, буду краток.",
 	"nyusha":  "Ой, привет! Я Нюша, здесь мы готовим скафандры к выходу в космос. Хочешь узнать, как они защищают космонавтов?",
 	"sovunya": "Здравствуй, дорогой! Я Совунья, врач станции. Здоровье космонавтов — моя забота. Если хочешь узнать, как тело ведёт себя в космосе — спрашивай!",
+	"karich":  "Приветствую, юный исследователь. Я Кар-Карыч. В космосе много тайн, и я готов поделиться своим богатым жизненным опытом!",
 }
 
-// Reply returns the line an NPC says. It drives the FSM through states:
-// GREETING → TELLING → DEEPDIVE/EXHAUSTED. Uses PickFact from world
-// package for keyword-aware topic selection.
+// Reply returns the line an NPC says.
 func (r *Responder) Reply(ctx context.Context, npc world.NPC, fact *world.Fact, playerMessage string, repeat bool, availableTopics []string, playerID string) string {
 	state := r.getState(playerID, npc.ID)
 
-	switch state {
-	case Greeting:
-		// First interaction — greet and transition to Telling
+	if state == Greeting {
 		r.setState(playerID, npc.ID, Telling)
-		if g, ok := greetings[npc.ID]; ok {
-			return g
+		msgLower := strings.TrimSpace(strings.ToLower(playerMessage))
+		// Если это просто открытие диалога ("Привет!"), сразу отдаём приветствие
+		if msgLower == "привет!" || msgLower == "привет" || msgLower == "" {
+			greeting := fmt.Sprintf("Привет! Я %s, %s. Спрашивай о чём хочешь!", npc.Name, npc.Title)
+			if g, ok := greetings[npc.ID]; ok {
+				greeting = g
+			}
+			r.appendHistory(playerID, npc.ID, playerMessage, greeting)
+			return greeting
 		}
-		return fmt.Sprintf("Привет! Я %s, %s. Спрашивай о чём хочешь!", npc.Name, npc.Title)
-
-	case Exhausted:
-		// All facts told
-		return "Кажется, я рассказал тебе всё, что знаю! Попробуй поговорить с кем-нибудь в другом отсеке станции."
 	}
 
-	// States: Telling or DeepDive
-	if fact == nil {
-		r.setState(playerID, npc.ID, Exhausted)
-		return "Хм, кажется, я рассказал тебе всё, что знаю по этой теме! Загляни в другие отсеки — там тоже много интересного."
+	if state == Exhausted && fact != nil {
+		return "Кажется, я рассказал тебе всё, что знаю! Попробуй поговорить с кем-нибудь в другом отсеке станции."
 	}
 
 	if repeat {
 		r.setState(playerID, npc.ID, DeepDive)
-	} else {
+	} else if fact != nil {
 		r.setState(playerID, npc.ID, Telling)
 	}
 
-	// Try Ollama first if available
+	// Try Ollama /api/chat first if available
 	if r.ollamaURL != "" {
-		text, err := r.askOllama(ctx, npc, fact, playerMessage, repeat, availableTopics)
+		hasFact := fact != nil
+		log.Printf("ai: запрос к Ollama для %s (hasFact: %v, вопрос: %q)", npc.Name, hasFact, playerMessage)
+		text, err := r.askOllamaChat(ctx, npc, fact, playerMessage, repeat, availableTopics, playerID)
 		if err != nil {
 			log.Printf("ai: ollama error for %s→%s, falling back to FSM: %v", playerID, npc.ID, err)
 		} else {
+			log.Printf("ai: Ollama успешно сгенерировала ответ для %s: %q", npc.Name, text)
+			r.appendHistory(playerID, npc.ID, playerMessage, text)
 			return text
 		}
 	}
 
-	// FSM fallback: templated response (client already displays speaker name in chat bubble)
-	return fsmLine(npc, fact, repeat, availableTopics)
+	// FSM fallback:
+	var fallbackText string
+	if fact != nil {
+		fallbackText = fsmLine(npc, fact, repeat, availableTopics)
+	} else if fallback, ok := npcOfftopicFallbacks[npc.ID]; ok {
+		fallbackText = fallback
+	} else {
+		fallbackText = fmt.Sprintf("Я — %s, %s. Давай лучше поговорим о космосе!", npc.Name, npc.Title)
+	}
+
+	r.appendHistory(playerID, npc.ID, playerMessage, fallbackText)
+	return fallbackText
 }
 
-// fsmLine generates a templated NPC response without LLM.
-// Note: we do not prefix with npc.Name because the client UI already shows it.
+// fsmLine generates a templated NPC response without LLM when a fact is present.
 func fsmLine(npc world.NPC, fact *world.Fact, repeat bool, availableTopics []string) string {
 	var sb strings.Builder
 
 	if repeat {
 		sb.WriteString("Помнишь, я уже рассказывал? Но повторю: ")
 	} else {
-		// Vary the intro based on difficulty
 		switch fact.Difficulty {
 		case "beginner":
 			sb.WriteString("А вот интересный факт! ")
@@ -161,7 +296,6 @@ func fsmLine(npc world.NPC, fact *world.Fact, repeat bool, availableTopics []str
 
 	sb.WriteString(fact.Text)
 
-	// If there are other untold topics, suggest them
 	if len(availableTopics) > 1 {
 		var otherTopics []string
 		for _, t := range availableTopics {
@@ -218,20 +352,10 @@ func topicDisplayName(topic string) string {
 }
 
 // ---------------------------------------------------------------------------
-// Ollama integration
+// Ollama /api/chat integration with multi-turn conversation memory
 // ---------------------------------------------------------------------------
 
-type ollamaRequest struct {
-	Model  string `json:"model"`
-	Prompt string `json:"prompt"`
-	Stream bool   `json:"stream"`
-}
-
-type ollamaResponse struct {
-	Response string `json:"response"`
-}
-
-func (r *Responder) askOllama(ctx context.Context, npc world.NPC, fact *world.Fact, playerMessage string, repeat bool, availableTopics []string) (string, error) {
+func (r *Responder) askOllamaChat(ctx context.Context, npc world.NPC, fact *world.Fact, playerMessage string, repeat bool, availableTopics []string, playerID string) (string, error) {
 	// Acquire semaphore (limit concurrent requests)
 	select {
 	case r.sem <- struct{}{}:
@@ -240,42 +364,44 @@ func (r *Responder) askOllama(ctx context.Context, npc world.NPC, fact *world.Fa
 		return "", ctx.Err()
 	}
 
-	ctx, cancel := context.WithTimeout(ctx, 8*time.Second)
+	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
 
-	repeatInstruction := ""
-	if repeat {
-		repeatInstruction = "Игрок уже слышал этот факт раньше — перефразируй его и заметь, что ты это уже рассказывал. "
+	sysPrompt, ok := npcSystemInstructions[npc.ID]
+	if !ok {
+		sysPrompt = fmt.Sprintf("Ты — %s, %s на космической станции «Шаролёт». Твой характер: %s. Отвечай кратко, по делу и строго на темы космоса.", npc.Name, npc.Title, npc.Personality)
 	}
 
-	topicHint := ""
-	if len(availableTopics) > 0 {
-		var names []string
-		for _, t := range availableTopics {
-			names = append(names, topicDisplayName(t))
+	if fact != nil {
+		sysPrompt += fmt.Sprintf("\nНАУЧНЫЙ ФАКТ, который ты должен органично и живо передать в ответе: «%s». Расскажи его простыми понятными словами в своём характере.", fact.Text)
+		if repeat {
+			sysPrompt += " Ты уже рассказывал этот факт раньше — заметь с улыбкой, что повторяешь его."
 		}
-		topicHint = fmt.Sprintf("Если уместно, в конце можешь предложить поговорить ещё про: %s. ", strings.Join(names, ", "))
+	} else {
+		sysPrompt += "\nВНИМАНИЕ: игрок НЕ просил научный факт. Отвечай как живой персонаж в диалоге, не придумывай и не вставляй случайные научные факты. Если это оффтоп (рецепты, игры, быт) — откажись по правилу выше!"
 	}
 
-	prompt := fmt.Sprintf(
-		"Ты — %s, %s на космической станции «Шаролёт». Твой характер: %s. "+
-			"Игрок говорит тебе: «%s». "+
-			"%s"+
-			"Ответь по-русски двумя-тремя короткими предложениями в своём стиле и обязательно передай этот научный факт: «%s». "+
-			"%s"+
-			"Не называй своё имя в начале реплики. Не упоминай, что ты ИИ, бот или персонаж мультфильма. Не используй маркдаун.",
-		npc.Name, npc.Title, npc.Personality, playerMessage,
-		repeatInstruction,
-		fact.Text,
-		topicHint,
-	)
+	messages := []chatMessage{
+		{Role: "system", Content: sysPrompt},
+	}
 
-	body, err := json.Marshal(ollamaRequest{Model: r.model, Prompt: prompt, Stream: false})
+	// Add recent conversation history for coherence
+	history := r.getHistory(playerID, npc.ID)
+	messages = append(messages, history...)
+
+	// Current turn
+	messages = append(messages, chatMessage{Role: "user", Content: playerMessage})
+
+	body, err := json.Marshal(ollamaChatRequest{
+		Model:    r.model,
+		Messages: messages,
+		Stream:   false,
+	})
 	if err != nil {
 		return "", err
 	}
 
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, r.ollamaURL+"/api/generate", bytes.NewReader(body))
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, r.ollamaURL+"/api/chat", bytes.NewReader(body))
 	if err != nil {
 		return "", err
 	}
@@ -291,12 +417,15 @@ func (r *Responder) askOllama(ctx context.Context, npc world.NPC, fact *world.Fa
 		return "", fmt.Errorf("ollama returned status %d", resp.StatusCode)
 	}
 
-	var out ollamaResponse
+	var out ollamaChatResponse
 	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
 		return "", err
 	}
-	if out.Response == "" {
+
+	text := strings.TrimSpace(out.Message.Content)
+	if text == "" {
 		return "", fmt.Errorf("ollama returned empty response")
 	}
-	return strings.TrimSpace(out.Response), nil
+
+	return text, nil
 }
