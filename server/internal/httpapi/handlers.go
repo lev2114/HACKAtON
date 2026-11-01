@@ -8,11 +8,15 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"log"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/gorilla/websocket"
+	"golang.org/x/crypto/bcrypt"
 
 	"server/internal/ai"
 	"server/internal/hub"
@@ -53,44 +57,117 @@ func randomID() string {
 	return hex.EncodeToString(b)
 }
 
-// --- POST /api/login ---
+// --- POST /api/register, POST /api/login ---
 
-type loginRequest struct {
-	Name string `json:"name"`
+type authRequest struct {
+	Name     string `json:"name"`
+	Password string `json:"password"`
 }
 
-type loginResponse struct {
+type authResponse struct {
 	PlayerID string `json:"playerId"`
 	Token    string `json:"token"`
 	Room     string `json:"room"`
 }
 
-func (s *Server) Login(w http.ResponseWriter, r *http.Request) {
-	var req loginRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.Name == "" {
-		http.Error(w, "name is required", http.StatusBadRequest)
+func writeJSONError(w http.ResponseWriter, status int, message string) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(status)
+	_ = json.NewEncoder(w).Encode(map[string]string{"error": message})
+}
+
+func decodeAuthRequest(r *http.Request) (authRequest, error) {
+	var req authRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		return req, fmt.Errorf("bad request body")
+	}
+	req.Name = strings.TrimSpace(req.Name)
+	if req.Name == "" {
+		return req, fmt.Errorf("имя не может быть пустым")
+	}
+	if len(req.Password) < 4 {
+		return req, fmt.Errorf("пароль должен быть не короче 4 символов")
+	}
+	return req, nil
+}
+
+func (s *Server) Register(w http.ResponseWriter, r *http.Request) {
+	req, err := decodeAuthRequest(r)
+	if err != nil {
+		writeJSONError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+
+	if _, err := s.Store.PlayerByName(req.Name); err == nil {
+		writeJSONError(w, http.StatusConflict, "это имя уже занято, выбери другое или войди")
+		return
+	} else if !errors.Is(err, store.ErrNotFound) {
+		log.Printf("register: lookup error: %v", err)
+		writeJSONError(w, http.StatusInternalServerError, "внутренняя ошибка сервера")
+		return
+	}
+
+	hash, err := bcrypt.GenerateFromPassword([]byte(req.Password), bcrypt.DefaultCost)
+	if err != nil {
+		log.Printf("register: hash error: %v", err)
+		writeJSONError(w, http.StatusInternalServerError, "внутренняя ошибка сервера")
 		return
 	}
 
 	player := store.Player{
-		ID:    randomID(),
-		Name:  req.Name,
-		Token: randomID(),
-		Room:  "hub",
+		ID:           randomID(),
+		Name:         req.Name,
+		PasswordHash: string(hash),
+		Token:        randomID(),
+		Room:         "hub",
 	}
 	if room, ok := s.World.Rooms[player.Room]; ok && room.Spawn != nil {
 		player.X = room.Position.X + room.Spawn.X
 		player.Y = room.Position.Y + room.Spawn.Y
 		player.Z = room.Position.Z + room.Spawn.Z
 	}
-	if err := s.Store.UpsertPlayer(player); err != nil {
-		log.Printf("login: store error: %v", err)
-		http.Error(w, "internal error", http.StatusInternalServerError)
+	if err := s.Store.CreatePlayer(player); err != nil {
+		log.Printf("register: store error: %v", err)
+		writeJSONError(w, http.StatusInternalServerError, "внутренняя ошибка сервера")
 		return
 	}
 
 	w.Header().Set("Content-Type", "application/json")
-	_ = json.NewEncoder(w).Encode(loginResponse{PlayerID: player.ID, Token: player.Token, Room: player.Room})
+	_ = json.NewEncoder(w).Encode(authResponse{PlayerID: player.ID, Token: player.Token, Room: player.Room})
+}
+
+func (s *Server) Login(w http.ResponseWriter, r *http.Request) {
+	req, err := decodeAuthRequest(r)
+	if err != nil {
+		writeJSONError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+
+	player, err := s.Store.PlayerByName(req.Name)
+	if err != nil {
+		if errors.Is(err, store.ErrNotFound) {
+			writeJSONError(w, http.StatusUnauthorized, "неверное имя или пароль")
+			return
+		}
+		log.Printf("login: lookup error: %v", err)
+		writeJSONError(w, http.StatusInternalServerError, "внутренняя ошибка сервера")
+		return
+	}
+
+	if err := bcrypt.CompareHashAndPassword([]byte(player.PasswordHash), []byte(req.Password)); err != nil {
+		writeJSONError(w, http.StatusUnauthorized, "неверное имя или пароль")
+		return
+	}
+
+	token := randomID()
+	if err := s.Store.UpdateToken(player.ID, token); err != nil {
+		log.Printf("login: token update error: %v", err)
+		writeJSONError(w, http.StatusInternalServerError, "внутренняя ошибка сервера")
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(authResponse{PlayerID: player.ID, Token: token, Room: player.Room})
 }
 
 // --- GET /ws?token=... ---

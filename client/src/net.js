@@ -16,13 +16,24 @@ export class Net {
     this.handlers[type] = handler;
   }
 
-  async login(name) {
-    const res = await fetch(`${this.serverUrl}/api/login`, {
+  async register(name, password) {
+    return this.#auth("register", name, password);
+  }
+
+  async login(name, password) {
+    return this.#auth("login", name, password);
+  }
+
+  async #auth(endpoint, name, password) {
+    const res = await fetch(`${this.serverUrl}/api/${endpoint}`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ name }),
+      body: JSON.stringify({ name, password }),
     });
-    if (!res.ok) throw new Error(`Сервер ${this.serverUrl} не выполнил вход (HTTP ${res.status}). Проверь, что Go-сервер запущен.`);
+    if (!res.ok) {
+      const body = await res.json().catch(() => null);
+      throw new Error(body?.error || `Сервер ${this.serverUrl} ответил HTTP ${res.status}.`);
+    }
     return res.json();
   }
 

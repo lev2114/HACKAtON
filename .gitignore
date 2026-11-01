@@ -8,6 +8,8 @@ server/*.exe
 server/server
 server/station.db
 server/server.log
+server/cert.pem
+server/key.pem
 
 # --- локальные артефакты ---
 *.db

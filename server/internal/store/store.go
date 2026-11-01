@@ -1,21 +1,25 @@
-// Package store persists player state and per-player NPC memory in SQLite.
-// This is what makes NPCs "remember" a player across reconnects and what
-// satisfies the task's "player state saved server-side" requirement.
+// Package store persists player accounts and per-player NPC memory in
+// SQLite. This is what makes NPCs "remember" a player across reconnects and
+// what satisfies the task's "player state saved server-side" requirement.
 package store
 
 import (
 	"database/sql"
+	"errors"
 	"fmt"
 
 	_ "modernc.org/sqlite"
 )
 
+var ErrNotFound = errors.New("player not found")
+
 type Player struct {
-	ID    string
-	Name  string
-	Token string
-	Room  string
-	X, Y, Z float64
+	ID           string
+	Name         string
+	PasswordHash string
+	Token        string
+	Room         string
+	X, Y, Z      float64
 }
 
 type Store struct {
@@ -25,7 +29,8 @@ type Store struct {
 const schema = `
 CREATE TABLE IF NOT EXISTS players (
 	id TEXT PRIMARY KEY,
-	name TEXT NOT NULL,
+	name TEXT NOT NULL UNIQUE,
+	password_hash TEXT NOT NULL,
 	token TEXT NOT NULL UNIQUE,
 	room TEXT NOT NULL DEFAULT 'hub',
 	x REAL NOT NULL DEFAULT 0,
@@ -60,27 +65,52 @@ func Open(path string) (*Store, error) {
 	return &Store{db: db}, nil
 }
 
-func (s *Store) UpsertPlayer(p Player) error {
-	_, err := s.db.Exec(`
-		INSERT INTO players (id, name, token, room, x, y, z, updated_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
-		ON CONFLICT(id) DO UPDATE SET
-			name = excluded.name,
-			token = excluded.token,
-			room = excluded.room,
-			x = excluded.x, y = excluded.y, z = excluded.z,
-			updated_at = CURRENT_TIMESTAMP
-	`, p.ID, p.Name, p.Token, p.Room, p.X, p.Y, p.Z)
+// CreatePlayer registers a brand-new account. Callers must check PlayerByName
+// first (httpapi does, to return a clean "name taken" error) — name is also
+// UNIQUE at the DB level as a backstop.
+func (s *Store) CreatePlayer(p Player) error {
+	_, err := s.db.Exec(
+		`INSERT INTO players (id, name, password_hash, token, room, x, y, z, updated_at)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)`,
+		p.ID, p.Name, p.PasswordHash, p.Token, p.Room, p.X, p.Y, p.Z,
+	)
 	return err
 }
 
-func (s *Store) PlayerByToken(token string) (*Player, error) {
-	row := s.db.QueryRow(`SELECT id, name, token, room, x, y, z FROM players WHERE token = ?`, token)
+func (s *Store) PlayerByName(name string) (*Player, error) {
+	row := s.db.QueryRow(
+		`SELECT id, name, password_hash, token, room, x, y, z FROM players WHERE name = ?`, name,
+	)
 	var p Player
-	if err := row.Scan(&p.ID, &p.Name, &p.Token, &p.Room, &p.X, &p.Y, &p.Z); err != nil {
+	if err := row.Scan(&p.ID, &p.Name, &p.PasswordHash, &p.Token, &p.Room, &p.X, &p.Y, &p.Z); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil, ErrNotFound
+		}
 		return nil, err
 	}
 	return &p, nil
+}
+
+func (s *Store) PlayerByToken(token string) (*Player, error) {
+	row := s.db.QueryRow(
+		`SELECT id, name, password_hash, token, room, x, y, z FROM players WHERE token = ?`, token,
+	)
+	var p Player
+	if err := row.Scan(&p.ID, &p.Name, &p.PasswordHash, &p.Token, &p.Room, &p.X, &p.Y, &p.Z); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil, ErrNotFound
+		}
+		return nil, err
+	}
+	return &p, nil
+}
+
+// UpdateToken issues a fresh session token on login (the old one, if any
+// client still holds it, stops working — simplest way to not accumulate
+// live tokens per account forever).
+func (s *Store) UpdateToken(id, token string) error {
+	_, err := s.db.Exec(`UPDATE players SET token = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?`, token, id)
+	return err
 }
 
 func (s *Store) SavePosition(id, room string, x, y, z float64) error {

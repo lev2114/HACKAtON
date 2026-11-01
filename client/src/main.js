@@ -51,7 +51,30 @@ function showChat(name, text) {
   chatBox.innerHTML = `<span class="name">${name}:</span>${text}`;
 }
 
-function spawnPlayerMesh(id, x, y, z) {
+// Канвас-текстура с именем, billboard (THREE.Sprite всегда смотрит на
+// камеру сам, не нужно вручную разворачивать на каждом кадре).
+function makeNameTag(name) {
+  const canvas = document.createElement("canvas");
+  canvas.width = 256;
+  canvas.height = 64;
+  const ctx = canvas.getContext("2d");
+  ctx.fillStyle = "rgba(10, 12, 24, 0.75)";
+  ctx.fillRect(0, 16, 256, 32);
+  ctx.font = "bold 28px system-ui, sans-serif";
+  ctx.textAlign = "center";
+  ctx.textBaseline = "middle";
+  ctx.fillStyle = "#e8ecff";
+  ctx.fillText(name, 128, 33);
+
+  const texture = new THREE.CanvasTexture(canvas);
+  const sprite = new THREE.Sprite(new THREE.SpriteMaterial({ map: texture, depthTest: false }));
+  sprite.scale.set(1.6, 0.4, 1);
+  sprite.position.y = 1.3; // над капсулой
+  sprite.renderOrder = 1; // поверх стен/моделей комнаты
+  return sprite;
+}
+
+function spawnPlayerMesh(id, name, x, y, z) {
   const existing = players.get(id);
   if (existing) {
     existing.position.set(x, y, z);
@@ -61,6 +84,7 @@ function spawnPlayerMesh(id, x, y, z) {
   const mat = new THREE.MeshStandardMaterial({ color: 0x66ccff });
   const mesh = new THREE.Mesh(geo, mat);
   mesh.position.set(x, y, z);
+  mesh.add(makeNameTag(name || "?"));
   scene.add(mesh);
   players.set(id, mesh);
   return mesh;
@@ -72,6 +96,10 @@ function removePlayerMesh(id) {
   scene.remove(mesh);
   mesh.geometry.dispose();
   mesh.material.dispose();
+  for (const child of mesh.children) {
+    if (child.material?.map) child.material.map.dispose();
+    child.material?.dispose();
+  }
   players.delete(id);
 }
 
@@ -95,7 +123,7 @@ function enterChunk(chunk, teleport, roster) {
   // события ПОСЛЕ нашего входа, без ростера мы бы их никогда не увидели.
   for (const p of roster || []) {
     if (p.playerId === myId) continue;
-    spawnPlayerMesh(p.playerId, p.x, p.y, p.z);
+    spawnPlayerMesh(p.playerId, p.name, p.x, p.y, p.z);
   }
   updateHud();
 }
@@ -131,7 +159,7 @@ net.on("chunk_data", (msg) => {
 
 net.on("player_joined", (msg) => {
   if (msg.playerId === myId) return;
-  spawnPlayerMesh(msg.playerId, msg.x, msg.y, msg.z);
+  spawnPlayerMesh(msg.playerId, msg.name, msg.x, msg.y, msg.z);
   updateHud();
 });
 
@@ -392,16 +420,38 @@ function tick() {
 
 const loginEl = document.getElementById("login");
 const loginForm = document.getElementById("login-form");
+const loginError = document.getElementById("login-error");
+const loginSubmit = document.getElementById("login-submit");
+const tabs = document.querySelectorAll("#login .tab");
+
+let authMode = "login"; // "login" | "register"
+const submitLabel = { login: "Войти на станцию", register: "Зарегистрироваться" };
+
+for (const tab of tabs) {
+  tab.addEventListener("click", () => {
+    authMode = tab.dataset.mode;
+    for (const t of tabs) t.classList.toggle("active", t === tab);
+    loginSubmit.textContent = submitLabel[authMode];
+    loginError.textContent = "";
+  });
+}
+
 loginForm.addEventListener("submit", async (e) => {
   e.preventDefault();
   const name = document.getElementById("login-name").value.trim();
-  if (!name) return;
+  const password = document.getElementById("login-password").value;
+  if (!name || !password) return;
+
+  loginError.textContent = "";
+  loginSubmit.disabled = true;
   try {
-    const { token } = await net.login(name);
+    const { token } = authMode === "register" ? await net.register(name, password) : await net.login(name, password);
     await net.connect(token);
     loginEl.style.display = "none";
     tick();
   } catch (err) {
-    alert("Не удалось подключиться к серверу: " + err.message);
+    loginError.textContent = err.message;
+  } finally {
+    loginSubmit.disabled = false;
   }
 });

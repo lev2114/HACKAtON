@@ -27,6 +27,7 @@ func main() {
 	dbPath := getenv("DB_PATH", "./station.db")
 	addr := getenv("ADDR", ":8080")
 	clientDist := getenv("CLIENT_DIST_DIR", "../client/dist")
+	certDir := getenv("CERT_DIR", ".")
 
 	// Пусто = ИИ сразу идёт в FSM-фоллбэк, без похода к Ollama.
 	ollamaURL := os.Getenv("OLLAMA_URL")
@@ -47,12 +48,18 @@ func main() {
 	srv := httpapi.New(w, st, h, responder)
 
 	mux := http.NewServeMux()
+	mux.HandleFunc("/api/register", srv.Register)
 	mux.HandleFunc("/api/login", srv.Login)
 	mux.HandleFunc("/ws", srv.WS)
 	mux.Handle("/", http.FileServer(http.Dir(clientDist)))
 
-	log.Printf("Шаролёт слушает на %s (world=%s, ollama=%q)", addr, worldDir, ollamaURL)
-	if err := http.ListenAndServe(addr, withCORS(mux)); err != nil {
+	certFile, keyFile, err := ensureSelfSignedCert(certDir)
+	if err != nil {
+		log.Fatalf("не удалось подготовить TLS-сертификат: %v", err)
+	}
+
+	log.Printf("Шаролёт слушает на https://%s (world=%s, ollama=%q)", addr, worldDir, ollamaURL)
+	if err := http.ListenAndServeTLS(addr, certFile, keyFile, withCORS(mux)); err != nil {
 		log.Fatal(err)
 	}
 }
