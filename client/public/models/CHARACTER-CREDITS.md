@@ -55,6 +55,13 @@ weights at load time, with gentle idle motion and conversation gestures.
 
 Pin and Kar-Karych use the existing pin-character.glb and karich-character.glb without replacement.
 
+pin-character.glb: the original download (`source/scene (9).glb` + `textures/Pin.png`)
+shipped the texture as a separate file, so the GLB itself rendered white. The
+texture is now embedded as the base color of both materials (body and hat share
+one atlas). The image is flipped vertically: the model's UVs use the OBJ
+convention (origin at the bottom), glTF expects the origin at the top. Geometry
+is unchanged.
+
 ## yozhik-character.glb
 
 - author: loh (https://sketchfab.com/nacho.nano)
