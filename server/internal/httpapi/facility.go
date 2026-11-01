@@ -4,6 +4,8 @@ import (
 	"context"
 	"math"
 	"math/rand/v2"
+	"sort"
+	"strings"
 	"sync"
 	"time"
 
@@ -44,6 +46,10 @@ type facilityState struct {
 	revision uint64
 	doors    map[string]*doorState
 	cleaners map[string][]*cleaner
+
+	// Admin controls (see Settings): stopped cleaners keep their pose.
+	cleanersEnabled bool
+	cleanerSpeed    float64
 }
 
 func doorKey(a, b string) string {
@@ -53,7 +59,7 @@ func doorKey(a, b string) string {
 	return a + ":" + b
 }
 func newFacility(w *world.World) *facilityState {
-	f := &facilityState{doors: map[string]*doorState{}, cleaners: map[string][]*cleaner{}}
+	f := &facilityState{doors: map[string]*doorState{}, cleaners: map[string][]*cleaner{}, cleanersEnabled: true, cleanerSpeed: 1}
 	for id, room := range w.Rooms {
 		for _, d := range room.Doors {
 			f.doors[doorKey(id, d.Room)] = &doorState{}
@@ -167,6 +173,63 @@ func (s *Server) onDoorSet(client *hub.Client, player *store.Player, msg incomin
 		return
 	}
 }
+
+// forceDoor is the admin override: no proximity check. Returns false if the
+// two rooms aren't connected by a door. Call without facility.mu held.
+func (s *Server) forceDoor(a, b string, open bool) bool {
+	s.facility.mu.Lock()
+	defer s.facility.mu.Unlock()
+	door := s.facility.doors[doorKey(a, b)]
+	if door == nil {
+		return false
+	}
+	if door.Open != open {
+		door.Open = open
+		door.Opened = time.Now()
+		s.facility.revision++
+	}
+	door.ClosePending = false
+	s.broadcastFacility(a)
+	s.broadcastFacility(b)
+	return true
+}
+
+func (s *Server) setCleaners(enabled bool, speed float64) {
+	s.facility.mu.Lock()
+	s.facility.cleanersEnabled = enabled
+	s.facility.cleanerSpeed = speed
+	s.facility.mu.Unlock()
+}
+
+// adminDoor is one row of the admin door table.
+type adminDoor struct {
+	A    string `json:"a"`
+	B    string `json:"b"`
+	Open bool   `json:"open"`
+}
+
+func (s *Server) doorList() []adminDoor {
+	s.facility.mu.Lock()
+	defer s.facility.mu.Unlock()
+	out := make([]adminDoor, 0, len(s.facility.doors))
+	for key, d := range s.facility.doors {
+		a, b, _ := strings.Cut(key, ":")
+		out = append(out, adminDoor{A: a, B: b, Open: d.Open})
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].A+out[i].B < out[j].A+out[j].B })
+	return out
+}
+
+func (s *Server) cleanerCount() int {
+	s.facility.mu.Lock()
+	defer s.facility.mu.Unlock()
+	n := 0
+	for _, list := range s.facility.cleaners {
+		n += len(list)
+	}
+	return n
+}
+
 func (s *Server) canUseDoor(roomID, target string, p *store.Player) bool {
 	room := s.World.Rooms[roomID]
 	for _, d := range room.Doors {
@@ -194,7 +257,11 @@ func (s *Server) RunFacility(ctx context.Context) {
 			return
 		case <-ticker.C:
 			s.facility.mu.Lock()
+			speed := s.facility.cleanerSpeed
 			for roomID, robots := range s.facility.cleaners {
+				if !s.facility.cleanersEnabled {
+					break
+				}
 				nav := s.World.Navigation[roomID]
 				players := s.Hub.PlayersInRoom(roomID, "")
 				for _, r := range robots {
@@ -227,11 +294,11 @@ func (s *Server) RunFacility(ctx context.Context) {
 					distance := math.Hypot(dx, dz)
 					angle := math.Atan2(dx, dz)
 					diff := math.Atan2(math.Sin(angle-r.Heading), math.Cos(angle-r.Heading))
-					r.Heading += math.Max(-0.22, math.Min(0.22, diff))
+					r.Heading += math.Max(-0.22*speed, math.Min(0.22*speed, diff))
 					if math.Abs(diff) > 0.4 {
 						continue
 					}
-					step := math.Min(distance, 0.038)
+					step := math.Min(distance, 0.038*speed)
 					if distance < 1e-6 {
 						r.previous = r.node
 						r.node = r.target

@@ -26,25 +26,66 @@ const (
 	Exhausted              // all facts told
 )
 
-type chatMessage struct {
+type ChatMessage struct {
 	Role    string `json:"role"`
 	Content string `json:"content"`
 }
 
 type ollamaChatRequest struct {
-	Model    string        `json:"model"`
-	Messages []chatMessage `json:"messages"`
-	Stream   bool          `json:"stream"`
+	Model    string         `json:"model"`
+	Messages []ChatMessage  `json:"messages"`
+	Stream   bool           `json:"stream"`
+	Options  map[string]any `json:"options,omitempty"`
 }
 
 type ollamaChatResponse struct {
-	Message chatMessage `json:"message"`
+	Message ChatMessage `json:"message"`
+}
+
+// Mode is how an NPC answers, set per character from the admin panel.
+type Mode string
+
+const (
+	ModeLLM    Mode = "llm"    // Ollama if available, FSM template otherwise
+	ModeFSM    Mode = "fsm"    // templates only, never calls Ollama
+	ModeSilent Mode = "silent" // doesn't talk at all
+)
+
+// Profile overrides an NPC's built-in character. Empty strings / zero values
+// fall back to the built-in prompt, greeting and off-topic line below.
+type Profile struct {
+	SystemPrompt string   `json:"systemPrompt"`
+	Greeting     string   `json:"greeting"`
+	Offtopic     string   `json:"offtopic"`
+	Mode         Mode     `json:"mode"`
+	Temperature  *float64 `json:"temperature,omitempty"`
+	MaxTokens    int      `json:"maxTokens,omitempty"`
+}
+
+// TranscriptLine is one line of the admin-visible dialogue log. This log is
+// longer than the 6-message LLM context and is never sent to the model.
+type TranscriptLine struct {
+	Role    string    `json:"role"`
+	Content string    `json:"content"`
+	At      time.Time `json:"at"`
+}
+
+const transcriptLimit = 40
+
+// Stats summarize LLM usage for the admin panel.
+type Stats struct {
+	Requests      int64   `json:"requests"`
+	Failures      int64   `json:"failures"`
+	Fallbacks     int64   `json:"fallbacks"`
+	InFlight      int     `json:"inFlight"`
+	AvgLatencyMs  float64 `json:"avgLatencyMs"`
+	LastLatencyMs float64 `json:"lastLatencyMs"`
+	LastError     string  `json:"lastError"`
 }
 
 // Responder generates NPC dialogue lines.
 type Responder struct {
 	ollamaURL string
-	model     string
 	client    *http.Client
 
 	// Semaphore to limit concurrent Ollama requests (avoid overloading
@@ -56,19 +97,33 @@ type Responder struct {
 	states map[string]State
 
 	// Conversation history per (playerID, npcID) pair for coherent multi-turn chat.
-	historyMu sync.RWMutex
-	history   map[string][]chatMessage
+	historyMu   sync.RWMutex
+	history     map[string][]ChatMessage
+	transcripts map[string][]TranscriptLine
+
+	// Admin-editable configuration.
+	cfgMu      sync.RWMutex
+	model      string
+	llmEnabled bool
+	profiles   map[string]Profile
+
+	statsMu      sync.Mutex
+	stats        Stats
+	totalLatency float64
 }
 
 // New builds a Responder.
 func New(ollamaURL, model string) *Responder {
 	r := &Responder{
-		ollamaURL: ollamaURL,
-		model:     model,
-		client:    &http.Client{Timeout: 35 * time.Second},
-		sem:       make(chan struct{}, 2), // at most 2 concurrent Ollama requests
-		states:    make(map[string]State),
-		history:   make(map[string][]chatMessage),
+		ollamaURL:   ollamaURL,
+		model:       model,
+		llmEnabled:  true,
+		client:      &http.Client{Timeout: 35 * time.Second},
+		sem:         make(chan struct{}, 2), // at most 2 concurrent Ollama requests
+		states:      make(map[string]State),
+		history:     make(map[string][]ChatMessage),
+		transcripts: make(map[string][]TranscriptLine),
+		profiles:    make(map[string]Profile),
 	}
 
 	// Warm up model in background so the first in-game query doesn't stall on load
@@ -79,11 +134,181 @@ func New(ollamaURL, model string) *Responder {
 	return r
 }
 
+// OllamaURL is fixed at startup (OLLAMA_URL); empty means no LLM at all.
+func (r *Responder) OllamaURL() string { return r.ollamaURL }
+
+func (r *Responder) LLM() (enabled bool, model string) {
+	r.cfgMu.RLock()
+	defer r.cfgMu.RUnlock()
+	return r.llmEnabled, r.model
+}
+
+// SetLLM switches the LLM on/off for every NPC and changes the model. A new
+// model is warmed up in the background so the next player doesn't wait.
+func (r *Responder) SetLLM(enabled bool, model string) {
+	r.cfgMu.Lock()
+	changed := model != "" && model != r.model
+	r.llmEnabled = enabled
+	if model != "" {
+		r.model = model
+	}
+	r.cfgMu.Unlock()
+	if changed && enabled && r.ollamaURL != "" {
+		go r.warmup()
+	}
+}
+
+// Profile returns the admin override for an NPC (zero value if none).
+func (r *Responder) Profile(npcID string) Profile {
+	r.cfgMu.RLock()
+	defer r.cfgMu.RUnlock()
+	return r.profiles[npcID]
+}
+
+func (r *Responder) SetProfile(npcID string, p Profile) {
+	r.cfgMu.Lock()
+	r.profiles[npcID] = p
+	r.cfgMu.Unlock()
+}
+
+func (r *Responder) ClearProfile(npcID string) {
+	r.cfgMu.Lock()
+	delete(r.profiles, npcID)
+	r.cfgMu.Unlock()
+}
+
+// Defaults are the built-in texts an override replaces, so the admin panel
+// can show what the character says without one.
+func Defaults(npc world.NPC) Profile {
+	p := Profile{
+		SystemPrompt: npcSystemInstructions[npc.ID],
+		Greeting:     greetings[npc.ID],
+		Offtopic:     npcOfftopicFallbacks[npc.ID],
+		Mode:         ModeLLM,
+	}
+	if p.SystemPrompt == "" {
+		p.SystemPrompt = genericPrompt(npc)
+	}
+	if p.Greeting == "" {
+		p.Greeting = genericGreeting(npc)
+	}
+	if p.Offtopic == "" {
+		p.Offtopic = genericOfftopic(npc)
+	}
+	return p
+}
+
+func genericPrompt(npc world.NPC) string {
+	return fmt.Sprintf("Ты — %s, %s на космической станции «Шаролёт». Твой характер: %s. Отвечай кратко, по делу и строго на темы космоса.", npc.Name, npc.Title, npc.Personality)
+}
+
+func genericGreeting(npc world.NPC) string {
+	return fmt.Sprintf("Привет! Я %s, %s. Спрашивай о чём хочешь!", npc.Name, npc.Title)
+}
+
+func genericOfftopic(npc world.NPC) string {
+	return fmt.Sprintf("Я — %s, %s. Давай лучше поговорим о космосе!", npc.Name, npc.Title)
+}
+
+// effective merges an override over the built-ins.
+func (r *Responder) effective(npc world.NPC) Profile {
+	p := Defaults(npc)
+	o := r.Profile(npc.ID)
+	if o.SystemPrompt != "" {
+		p.SystemPrompt = o.SystemPrompt
+	}
+	if o.Greeting != "" {
+		p.Greeting = o.Greeting
+	}
+	if o.Offtopic != "" {
+		p.Offtopic = o.Offtopic
+	}
+	if o.Mode != "" {
+		p.Mode = o.Mode
+	}
+	p.Temperature = o.Temperature
+	p.MaxTokens = o.MaxTokens
+	return p
+}
+
+func (r *Responder) Stats() Stats {
+	r.statsMu.Lock()
+	defer r.statsMu.Unlock()
+	return r.stats
+}
+
+func (r *Responder) recordLLM(start time.Time, err error) {
+	ms := float64(time.Since(start).Microseconds()) / 1000
+	r.statsMu.Lock()
+	defer r.statsMu.Unlock()
+	r.stats.InFlight--
+	r.stats.Requests++
+	if err != nil {
+		r.stats.Failures++
+		r.stats.LastError = err.Error()
+		return
+	}
+	r.totalLatency += ms
+	r.stats.LastLatencyMs = ms
+	r.stats.AvgLatencyMs = r.totalLatency / float64(r.stats.Requests-r.stats.Failures)
+}
+
+// Conversation is one player's dialogue log with an NPC.
+type Conversation struct {
+	PlayerID string           `json:"playerId"`
+	Lines    []TranscriptLine `json:"lines"`
+}
+
+// Conversations returns every player's dialogue log with npcID.
+func (r *Responder) Conversations(npcID string) []Conversation {
+	r.historyMu.RLock()
+	defer r.historyMu.RUnlock()
+	var out []Conversation
+	for key, lines := range r.transcripts {
+		playerID, npc, _ := strings.Cut(key, ":")
+		if npc != npcID {
+			continue
+		}
+		out = append(out, Conversation{PlayerID: playerID, Lines: append([]TranscriptLine(nil), lines...)})
+	}
+	return out
+}
+
+// ResetMemory makes an NPC forget its dialogue with one player (or with
+// everyone, playerID == ""): LLM context, admin transcript and FSM state.
+// Told-facts memory lives in SQLite and is reset separately by the caller.
+func (r *Responder) ResetMemory(npcID, playerID string) {
+	match := func(key string) bool {
+		p, n, _ := strings.Cut(key, ":")
+		return n == npcID && (playerID == "" || p == playerID)
+	}
+	r.historyMu.Lock()
+	for k := range r.history {
+		if match(k) {
+			delete(r.history, k)
+		}
+	}
+	for k := range r.transcripts {
+		if match(k) {
+			delete(r.transcripts, k)
+		}
+	}
+	r.historyMu.Unlock()
+	r.mu.Lock()
+	for k := range r.states {
+		if match(k) {
+			delete(r.states, k)
+		}
+	}
+	r.mu.Unlock()
+}
+
 func (r *Responder) warmup() {
-	log.Printf("ai: прогрев модели Ollama (%s)...", r.model)
+	_, model := r.LLM()
+	log.Printf("ai: прогрев модели Ollama (%s)...", model)
 	body, _ := json.Marshal(ollamaChatRequest{
-		Model: r.model,
-		Messages: []chatMessage{
+		Model: model,
+		Messages: []ChatMessage{
 			{Role: "user", Content: "Привет"},
 		},
 		Stream: false,
@@ -100,7 +325,7 @@ func (r *Responder) warmup() {
 		return
 	}
 	defer resp.Body.Close()
-	log.Printf("ai: модель Ollama (%s) прогрета и загружена в память!", r.model)
+	log.Printf("ai: модель Ollama (%s) прогрета и загружена в память!", model)
 }
 
 func stateKey(playerID, npcID string) string {
@@ -119,14 +344,14 @@ func (r *Responder) setState(playerID, npcID string, s State) {
 	r.mu.Unlock()
 }
 
-func (r *Responder) getHistory(playerID, npcID string) []chatMessage {
+func (r *Responder) getHistory(playerID, npcID string) []ChatMessage {
 	r.historyMu.RLock()
 	defer r.historyMu.RUnlock()
 	raw := r.history[stateKey(playerID, npcID)]
 	if len(raw) == 0 {
 		return nil
 	}
-	cp := make([]chatMessage, len(raw))
+	cp := make([]ChatMessage, len(raw))
 	copy(cp, raw)
 	return cp
 }
@@ -137,16 +362,29 @@ func (r *Responder) appendHistory(playerID, npcID, userMsg, assistantMsg string)
 	key := stateKey(playerID, npcID)
 	h := r.history[key]
 	if userMsg != "" {
-		h = append(h, chatMessage{Role: "user", Content: userMsg})
+		h = append(h, ChatMessage{Role: "user", Content: userMsg})
 	}
 	if assistantMsg != "" {
-		h = append(h, chatMessage{Role: "assistant", Content: assistantMsg})
+		h = append(h, ChatMessage{Role: "assistant", Content: assistantMsg})
 	}
 	// Keep last 6 messages (3 dialogue turns) for compact context
 	if len(h) > 6 {
 		h = h[len(h)-6:]
 	}
 	r.history[key] = h
+
+	t := r.transcripts[key]
+	now := time.Now()
+	if userMsg != "" {
+		t = append(t, TranscriptLine{Role: "user", Content: userMsg, At: now})
+	}
+	if assistantMsg != "" {
+		t = append(t, TranscriptLine{Role: "assistant", Content: assistantMsg, At: now})
+	}
+	if len(t) > transcriptLimit {
+		t = t[len(t)-transcriptLimit:]
+	}
+	r.transcripts[key] = t
 }
 
 // ---------------------------------------------------------------------------
@@ -223,6 +461,13 @@ var greetings = map[string]string{
 
 // Reply returns the line an NPC says.
 func (r *Responder) Reply(ctx context.Context, npc world.NPC, fact *world.Fact, playerMessage string, repeat bool, availableTopics []string, playerID string) string {
+	profile := r.effective(npc)
+	if profile.Mode == ModeSilent {
+		text := fmt.Sprintf("%s сейчас занят и не отвечает.", npc.Name)
+		r.appendHistory(playerID, npc.ID, playerMessage, text)
+		return text
+	}
+
 	state := r.getState(playerID, npc.ID)
 
 	if state == Greeting {
@@ -230,12 +475,8 @@ func (r *Responder) Reply(ctx context.Context, npc world.NPC, fact *world.Fact, 
 		msgLower := strings.TrimSpace(strings.ToLower(playerMessage))
 		// Если это просто открытие диалога ("Привет!"), сразу отдаём приветствие
 		if msgLower == "привет!" || msgLower == "привет" || msgLower == "" {
-			greeting := fmt.Sprintf("Привет! Я %s, %s. Спрашивай о чём хочешь!", npc.Name, npc.Title)
-			if g, ok := greetings[npc.ID]; ok {
-				greeting = g
-			}
-			r.appendHistory(playerID, npc.ID, playerMessage, greeting)
-			return greeting
+			r.appendHistory(playerID, npc.ID, playerMessage, profile.Greeting)
+			return profile.Greeting
 		}
 	}
 
@@ -250,10 +491,11 @@ func (r *Responder) Reply(ctx context.Context, npc world.NPC, fact *world.Fact, 
 	}
 
 	// Try Ollama /api/chat first if available
-	if r.ollamaURL != "" {
+	llmEnabled, model := r.LLM()
+	if r.ollamaURL != "" && llmEnabled && profile.Mode == ModeLLM {
 		hasFact := fact != nil
 		log.Printf("ai: запрос к Ollama для %s (hasFact: %v, вопрос: %q)", npc.Name, hasFact, playerMessage)
-		text, err := r.askOllamaChat(ctx, npc, fact, playerMessage, repeat, availableTopics, playerID)
+		text, err := r.askOllamaChat(ctx, npc, profile, model, fact, playerMessage, repeat, playerID)
 		if err != nil {
 			log.Printf("ai: ollama error for %s→%s, falling back to FSM: %v", playerID, npc.ID, err)
 		} else {
@@ -264,13 +506,12 @@ func (r *Responder) Reply(ctx context.Context, npc world.NPC, fact *world.Fact, 
 	}
 
 	// FSM fallback:
-	var fallbackText string
+	r.statsMu.Lock()
+	r.stats.Fallbacks++
+	r.statsMu.Unlock()
+	fallbackText := profile.Offtopic
 	if fact != nil {
 		fallbackText = fsmLine(npc, fact, repeat, availableTopics)
-	} else if fallback, ok := npcOfftopicFallbacks[npc.ID]; ok {
-		fallbackText = fallback
-	} else {
-		fallbackText = fmt.Sprintf("Я — %s, %s. Давай лучше поговорим о космосе!", npc.Name, npc.Title)
 	}
 
 	r.appendHistory(playerID, npc.ID, playerMessage, fallbackText)
@@ -355,7 +596,7 @@ func topicDisplayName(topic string) string {
 // Ollama /api/chat integration with multi-turn conversation memory
 // ---------------------------------------------------------------------------
 
-func (r *Responder) askOllamaChat(ctx context.Context, npc world.NPC, fact *world.Fact, playerMessage string, repeat bool, availableTopics []string, playerID string) (string, error) {
+func (r *Responder) askOllamaChat(ctx context.Context, npc world.NPC, profile Profile, model string, fact *world.Fact, playerMessage string, repeat bool, playerID string) (text string, err error) {
 	// Acquire semaphore (limit concurrent requests)
 	select {
 	case r.sem <- struct{}{}:
@@ -364,13 +605,16 @@ func (r *Responder) askOllamaChat(ctx context.Context, npc world.NPC, fact *worl
 		return "", ctx.Err()
 	}
 
+	r.statsMu.Lock()
+	r.stats.InFlight++
+	r.statsMu.Unlock()
+	start := time.Now()
+	defer func() { r.recordLLM(start, err) }()
+
 	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
 
-	sysPrompt, ok := npcSystemInstructions[npc.ID]
-	if !ok {
-		sysPrompt = fmt.Sprintf("Ты — %s, %s на космической станции «Шаролёт». Твой характер: %s. Отвечай кратко, по делу и строго на темы космоса.", npc.Name, npc.Title, npc.Personality)
-	}
+	sysPrompt := profile.SystemPrompt
 
 	if fact != nil {
 		sysPrompt += fmt.Sprintf("\nНАУЧНЫЙ ФАКТ, который ты должен органично и живо передать в ответе: «%s». Расскажи его простыми понятными словами в своём характере.", fact.Text)
@@ -381,7 +625,7 @@ func (r *Responder) askOllamaChat(ctx context.Context, npc world.NPC, fact *worl
 		sysPrompt += "\nВНИМАНИЕ: игрок НЕ просил научный факт. Отвечай как живой персонаж в диалоге, не придумывай и не вставляй случайные научные факты. Если это оффтоп (рецепты, игры, быт) — откажись по правилу выше!"
 	}
 
-	messages := []chatMessage{
+	messages := []ChatMessage{
 		{Role: "system", Content: sysPrompt},
 	}
 
@@ -390,12 +634,20 @@ func (r *Responder) askOllamaChat(ctx context.Context, npc world.NPC, fact *worl
 	messages = append(messages, history...)
 
 	// Current turn
-	messages = append(messages, chatMessage{Role: "user", Content: playerMessage})
+	messages = append(messages, ChatMessage{Role: "user", Content: playerMessage})
 
+	options := map[string]any{}
+	if profile.Temperature != nil {
+		options["temperature"] = *profile.Temperature
+	}
+	if profile.MaxTokens > 0 {
+		options["num_predict"] = profile.MaxTokens
+	}
 	body, err := json.Marshal(ollamaChatRequest{
-		Model:    r.model,
+		Model:    model,
 		Messages: messages,
 		Stream:   false,
+		Options:  options,
 	})
 	if err != nil {
 		return "", err
@@ -422,7 +674,7 @@ func (r *Responder) askOllamaChat(ctx context.Context, npc world.NPC, fact *worl
 		return "", err
 	}
 
-	text := strings.TrimSpace(out.Message.Content)
+	text = strings.TrimSpace(out.Message.Content)
 	if text == "" {
 		return "", fmt.Errorf("ollama returned empty response")
 	}

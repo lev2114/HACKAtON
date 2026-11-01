@@ -30,6 +30,7 @@ type Player struct {
 	TokenExpiresAt time.Time
 	Room           string
 	X, Y, Z        float64
+	IsAdmin        bool
 }
 
 type Store struct {
@@ -95,7 +96,118 @@ func Open(path string) (*Store, error) {
 			return nil, fmt.Errorf("migrate token_expires_at: %w", err)
 		}
 	}
+	if _, err := db.Exec(`ALTER TABLE players ADD COLUMN is_admin INTEGER NOT NULL DEFAULT 0`); err != nil {
+		if !strings.Contains(err.Error(), "duplicate column") {
+			return nil, fmt.Errorf("migrate is_admin: %w", err)
+		}
+	}
+	// Admin-panel edits are stored as overrides on top of world-data/*.json
+	// (which stays untouched in git): kind = "npc" | "facts" | "settings",
+	// key = npc id / fact bank / "global", value = JSON.
+	if _, err := db.Exec(`CREATE TABLE IF NOT EXISTS admin_config (
+		kind TEXT NOT NULL,
+		key TEXT NOT NULL,
+		value TEXT NOT NULL,
+		updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+		PRIMARY KEY (kind, key)
+	)`); err != nil {
+		return nil, fmt.Errorf("migrate admin_config: %w", err)
+	}
 	return &Store{db: db}, nil
+}
+
+// SetAdmin grants or revokes the admin role by account name. Returns
+// ErrNotFound if no such account exists yet.
+func (s *Store) SetAdmin(name string, admin bool) error {
+	res, err := s.db.Exec(`UPDATE players SET is_admin = ? WHERE name = ?`, admin, name)
+	if err != nil {
+		return err
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		return ErrNotFound
+	}
+	return nil
+}
+
+// PlayerNames maps account ids to names, for showing whose dialogue
+// history the admin is looking at.
+func (s *Store) PlayerNames() (map[string]string, error) {
+	rows, err := s.db.Query(`SELECT id, name FROM players`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := map[string]string{}
+	for rows.Next() {
+		var id, name string
+		if err := rows.Scan(&id, &name); err != nil {
+			return nil, err
+		}
+		out[id] = name
+	}
+	return out, rows.Err()
+}
+
+// AdminConfig returns every override of one kind as key -> raw JSON.
+func (s *Store) AdminConfig(kind string) (map[string]string, error) {
+	rows, err := s.db.Query(`SELECT key, value FROM admin_config WHERE kind = ?`, kind)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := map[string]string{}
+	for rows.Next() {
+		var key, value string
+		if err := rows.Scan(&key, &value); err != nil {
+			return nil, err
+		}
+		out[key] = value
+	}
+	return out, rows.Err()
+}
+
+func (s *Store) SetAdminConfig(kind, key, value string) error {
+	_, err := s.db.Exec(
+		`INSERT INTO admin_config (kind, key, value, updated_at) VALUES (?, ?, ?, CURRENT_TIMESTAMP)
+		 ON CONFLICT(kind, key) DO UPDATE SET value = excluded.value, updated_at = CURRENT_TIMESTAMP`,
+		kind, key, value,
+	)
+	return err
+}
+
+func (s *Store) DeleteAdminConfig(kind, key string) error {
+	_, err := s.db.Exec(`DELETE FROM admin_config WHERE kind = ? AND key = ?`, kind, key)
+	return err
+}
+
+// ResetToldFacts makes an NPC forget which facts it already told. Empty
+// playerID = forget for every player.
+func (s *Store) ResetToldFacts(npcID, playerID string) error {
+	if playerID == "" {
+		_, err := s.db.Exec(`DELETE FROM npc_memory WHERE npc_id = ?`, npcID)
+		return err
+	}
+	_, err := s.db.Exec(`DELETE FROM npc_memory WHERE npc_id = ? AND player_id = ?`, npcID, playerID)
+	return err
+}
+
+// ToldFactCounts returns, for one NPC, how many facts each player has heard.
+func (s *Store) ToldFactCounts(npcID string) (map[string]int, error) {
+	rows, err := s.db.Query(`SELECT player_id, COUNT(*) FROM npc_memory WHERE npc_id = ? GROUP BY player_id`, npcID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := map[string]int{}
+	for rows.Next() {
+		var id string
+		var n int
+		if err := rows.Scan(&id, &n); err != nil {
+			return nil, err
+		}
+		out[id] = n
+	}
+	return out, rows.Err()
 }
 
 // CreatePlayer registers a brand-new account. Callers must check PlayerByName
@@ -112,10 +224,10 @@ func (s *Store) CreatePlayer(p Player) error {
 
 func (s *Store) PlayerByName(name string) (*Player, error) {
 	row := s.db.QueryRow(
-		`SELECT id, name, password_hash, token, token_expires_at, room, x, y, z FROM players WHERE name = ?`, name,
+		`SELECT id, name, password_hash, token, token_expires_at, room, x, y, z, is_admin FROM players WHERE name = ?`, name,
 	)
 	var p Player
-	if err := row.Scan(&p.ID, &p.Name, &p.PasswordHash, &p.Token, &p.TokenExpiresAt, &p.Room, &p.X, &p.Y, &p.Z); err != nil {
+	if err := row.Scan(&p.ID, &p.Name, &p.PasswordHash, &p.Token, &p.TokenExpiresAt, &p.Room, &p.X, &p.Y, &p.Z, &p.IsAdmin); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return nil, ErrNotFound
 		}

@@ -30,16 +30,48 @@ type Client struct {
 	// see the throttling comment in httpapi.onMove.
 	LastPersistedMoveAt time.Time
 
+	ConnectedAt time.Time
+	RemoteAddr  string
+
 	send chan []byte
+
+	// sendMu/closed make Send safe after Close: npc_talk replies are
+	// produced on their own goroutine and may finish after the player left.
+	sendMu sync.Mutex
+	closed bool
+
+	statsMu sync.Mutex
+	stats   ClientStats
+	pings   map[uint64]time.Time
+	dropped int
+}
+
+// ClientStats is what the admin panel shows per connection. RTT is measured
+// by the server (ping → pong round trip); the rest is self-reported by the
+// client inside its pong.
+type ClientStats struct {
+	PingMs     float64   `json:"pingMs"`
+	FPS        float64   `json:"fps"`
+	FrameMs    float64   `json:"frameMs"`
+	MemoryMB   float64   `json:"memoryMB"`
+	DrawCalls  int       `json:"drawCalls"`
+	Triangles  int       `json:"triangles"`
+	Paused     bool      `json:"paused"`
+	ChatOpen   bool      `json:"chatOpen"`
+	Dropped    int       `json:"droppedMessages"`
+	LastReport time.Time `json:"lastReport"`
 }
 
 func NewClient(conn *websocket.Conn, playerID, name, room string) *Client {
 	return &Client{
-		Conn:     conn,
-		PlayerID: playerID,
-		Name:     name,
-		room:     room,
-		send:     make(chan []byte, 16),
+		Conn:        conn,
+		PlayerID:    playerID,
+		Name:        name,
+		room:        room,
+		send:        make(chan []byte, 16),
+		ConnectedAt: time.Now(),
+		RemoteAddr:  conn.RemoteAddr().String(),
+		pings:       map[uint64]time.Time{},
 	}
 }
 
@@ -49,11 +81,54 @@ func (c *Client) Send(v any) {
 		log.Printf("hub: marshal error for %s: %v", c.PlayerID, err)
 		return
 	}
+	c.sendMu.Lock()
+	defer c.sendMu.Unlock()
+	if c.closed {
+		return
+	}
 	select {
 	case c.send <- data:
 	default:
+		c.statsMu.Lock()
+		c.dropped++
+		c.statsMu.Unlock()
 		log.Printf("hub: dropped message for slow client %s", c.PlayerID)
 	}
+}
+
+// SentPing remembers when ping id left, so the matching pong yields an RTT.
+func (c *Client) SentPing(id uint64) {
+	c.statsMu.Lock()
+	defer c.statsMu.Unlock()
+	c.pings[id] = time.Now()
+	// A client that never answers must not grow this map forever.
+	for k, t := range c.pings {
+		if time.Since(t) > time.Minute {
+			delete(c.pings, k)
+		}
+	}
+}
+
+// ReceivedPong records the round trip for ping id and the client's report.
+// Unknown ids (already expired, or forged) only update the report.
+func (c *Client) ReceivedPong(id uint64, report ClientStats) {
+	c.statsMu.Lock()
+	defer c.statsMu.Unlock()
+	report.PingMs = c.stats.PingMs
+	if sent, ok := c.pings[id]; ok {
+		report.PingMs = float64(time.Since(sent).Microseconds()) / 1000
+		delete(c.pings, id)
+	}
+	report.LastReport = time.Now()
+	c.stats = report
+}
+
+func (c *Client) Stats() ClientStats {
+	c.statsMu.Lock()
+	defer c.statsMu.Unlock()
+	s := c.stats
+	s.Dropped = c.dropped
+	return s
 }
 
 // WritePump must run in its own goroutine for the lifetime of the
@@ -70,6 +145,12 @@ func (c *Client) WritePump() {
 // Close stops WritePump once it drains whatever is already buffered. Call
 // it only after Unregister, so no other goroutine can still be calling Send.
 func (c *Client) Close() {
+	c.sendMu.Lock()
+	defer c.sendMu.Unlock()
+	if c.closed {
+		return
+	}
+	c.closed = true
 	close(c.send)
 }
 
@@ -149,6 +230,57 @@ func (h *Hub) PlayersInRoom(roomID, exceptPlayerID string) []PlayerInfo {
 		out = append(out, PlayerInfo{PlayerID: id, Name: c.Name, X: c.x, Y: c.y, Z: c.z})
 	}
 	return out
+}
+
+func (h *Hub) Get(playerID string) (*Client, bool) {
+	h.mu.RLock()
+	defer h.mu.RUnlock()
+	c, ok := h.clients[playerID]
+	return c, ok
+}
+
+// ConnectedClient is one row of the admin panel's live client table.
+type ConnectedClient struct {
+	PlayerInfo
+	Room        string      `json:"room"`
+	RemoteAddr  string      `json:"remoteAddr"`
+	ConnectedAt time.Time   `json:"connectedAt"`
+	Stats       ClientStats `json:"stats"`
+}
+
+func (h *Hub) Snapshot() []ConnectedClient {
+	h.mu.RLock()
+	clients := make([]*Client, 0, len(h.clients))
+	rows := make([]ConnectedClient, 0, len(h.clients))
+	for id, c := range h.clients {
+		clients = append(clients, c)
+		rows = append(rows, ConnectedClient{
+			PlayerInfo:  PlayerInfo{PlayerID: id, Name: c.Name, X: c.x, Y: c.y, Z: c.z},
+			Room:        c.room,
+			RemoteAddr:  c.RemoteAddr,
+			ConnectedAt: c.ConnectedAt,
+		})
+	}
+	h.mu.RUnlock()
+	// Stats take the client's own lock — read them outside h.mu.
+	for i, c := range clients {
+		rows[i].Stats = c.Stats()
+	}
+	return rows
+}
+
+func (h *Hub) Count() int {
+	h.mu.RLock()
+	defer h.mu.RUnlock()
+	return len(h.clients)
+}
+
+func (h *Hub) BroadcastAll(v any) {
+	h.mu.RLock()
+	defer h.mu.RUnlock()
+	for _, c := range h.clients {
+		c.Send(v)
+	}
 }
 
 // BroadcastToRoom sends v to every connected client currently in roomID,
