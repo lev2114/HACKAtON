@@ -564,9 +564,11 @@ func (s *Server) adminTeleport(w http.ResponseWriter, r *http.Request) {
 		"position": pos,
 	})
 	s.Hub.BroadcastToRoom(oldRoom, playerID, map[string]any{"type": "player_left", "playerId": playerID})
+	appearance, _ := s.Hub.Player(playerID)
 	s.Hub.BroadcastToRoom(req.Room, playerID, map[string]any{
 		"type": "player_joined", "playerId": playerID, "name": client.Name,
 		"x": pos.X, "y": pos.Y, "z": pos.Z,
+		"suitColor": appearance.SuitColor, "apples": appearance.Apples,
 	})
 	writeJSON(w, map[string]bool{"ok": true})
 }

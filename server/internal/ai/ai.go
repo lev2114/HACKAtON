@@ -29,8 +29,9 @@ const (
 )
 
 type chatMessage struct {
-	Role    string `json:"role"`
-	Content string `json:"content"`
+	Role      string          `json:"role"`
+	Content   string          `json:"content"`
+	ToolCalls []worldToolCall `json:"tool_calls,omitempty"`
 }
 
 type ollamaOptions struct {
@@ -91,6 +92,7 @@ type ollamaChatRequest struct {
 	Messages []chatMessage  `json:"messages"`
 	Options  *ollamaOptions `json:"options,omitempty"`
 	Stream   bool           `json:"stream"`
+	Tools    []worldTool    `json:"tools,omitempty"`
 }
 
 type ollamaChatResponse struct {
@@ -1153,6 +1155,7 @@ func (r *Responder) askOllamaChat(ctx context.Context, npc world.NPC, profile Pr
 
 	var sb strings.Builder
 	sb.WriteString(basePrompt)
+	sb.WriteString("\nФизические действия выполняет только игровой сервер. В этом текстовом ответе не утверждай, что уже выдал предмет, перекрасил скафандр или начал вести игрока: подтверждение таких действий сервер сообщает отдельно. Можно объяснять возможности Совуньи (яблоко), Кроша (проводник к двери) и Нюши (цвет скафандра).")
 
 	// Добавляем справочник всех 10 комнат станции строго по списку:
 	sb.WriteString("\n\nСПРАВОЧНИК СТАНЦИИ «ШАРОЛЁТ» (КТО В КАКОМ ОТСЕКЕ И О ЧЁМ РАССКАЗЫВАЕТ):\n")

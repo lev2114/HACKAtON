@@ -8,6 +8,7 @@ import { createDoors } from "./doors.js";
 import { createRoombas } from "./roombas.js";
 import { createNpcAnimation } from "./npc-animation.js";
 import { createNpcMotion } from "./npc-motion.js";
+import { createRoomActions } from "./world-actions.js";
 
 const loader = new GLTFLoader();
 async function loadModel(url, built) {
@@ -77,6 +78,7 @@ export function buildRoom(scene, chunk) {
     built.npcMeshes[npc.id] = buildNpcEntity(built, npc);
   }
   built.npcMotion = createNpcMotion(room, built.npcMeshes, built.npcAnimations);
+  built.actions = createRoomActions(group, room);
 
   addDoorwayLight(group, room, chunk.neighbors);
   built.doors = createDoors(group, room, built.neighbors);
@@ -85,6 +87,7 @@ export function buildRoom(scene, chunk) {
     built.doors.applyState(state, instant);
     built.roombas?.applyState(state);
     built.npcMotion.applyState(state, instant);
+    built.actions.applyState(state);
   };
 
   scene.add(group);
@@ -318,6 +321,7 @@ export async function destroyRoom(scene, built) {
   built.roombas = null;
   built.npcAnimations.clear();
   built.npcMotion.clear();
+  built.actions.clear();
   disposeOwnedResources(built.group);
   built.group.clear();
   built.npcMeshes = {};

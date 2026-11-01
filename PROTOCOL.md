@@ -312,3 +312,28 @@ error {code:"session_in_use",message} и закрывается. Клиент ж
 `npc` / `facts`) **поверх** `world-data/*.json` — сами JSON-файлы в git не
 меняются, поэтому у тиммейтов при `git pull` ничего не конфликтует. При
 старте сервер применяет сохранённые правки (`LoadAdminOverrides`).
+
+## NPC world actions (branch llm_to_world)
+
+NPC dialogue can propose one whitelisted action per request: `give_apple`
+(Sovunya), `guide_to_door {room}` (Krosh, connected hub door), or
+`set_suit_color {color}` (Nyusha, named palette). Ollama function calls and
+offline intent matching use the same action executor. Clients never submit
+arbitrary tools. Execution rechecks the originating live connection, active
+conversation generation, room and distance after model generation.
+
+`welcome` includes `playerState:{playerId,apples,suitColor,revision}`.
+Server -> client `player_state {state:...}` goes to players in that room;
+rosters and `player_joined` include `apples,suitColor` for late joins.
+Apples (max 5, grant cooldown 5 s) and suit color are persisted per account
+in SQLite `player_world_state`. Client -> server `use_item {item:"apple"}`
+consumes one owned apple; quantities cannot go negative.
+
+Server -> client `npc_action {room,npcId,playerId,action,from:{x,y,z},to:{x,y,z}}`
+is a transient cosmetic event (apple handoff); persistent state comes from
+player_state. Room snapshots extend each NPC pose with `guidePlayer` and
+`guideRoom` (empty strings when inactive), plus `guideArrived` boolean.
+Guidance starts after closing chat, stays inside the room on checked nav
+edges, pauses if the owner is >3.5 m away, and ends on arrival + exit,
+disconnect, room change or a 180 s timeout. Other players cannot steal a guide.
+Doors retain their existing E interaction. Updated client/server deploy together.

@@ -11,12 +11,15 @@ import (
 )
 
 type npcPose struct {
-	ID        string  `json:"id"`
-	X         float64 `json:"x"`
-	Y         float64 `json:"y"`
-	Z         float64 `json:"z"`
-	Heading   float64 `json:"heading"`
-	TalkingTo string  `json:"talkingTo"`
+	ID           string  `json:"id"`
+	X            float64 `json:"x"`
+	Y            float64 `json:"y"`
+	Z            float64 `json:"z"`
+	Heading      float64 `json:"heading"`
+	TalkingTo    string  `json:"talkingTo"`
+	GuidePlayer  string  `json:"guidePlayer"`
+	GuideRoom    string  `json:"guideRoom"`
+	GuideArrived bool    `json:"guideArrived"`
 }
 
 type wanderingNPC struct {
@@ -25,9 +28,12 @@ type wanderingNPC struct {
 	route        []int
 	pause        float64
 	blockedFor   float64
+	guideGoal    int
+	guideUntil   time.Time
 }
 
 type npcConversation struct {
+	id      uint64
 	npcID   string
 	expires time.Time
 }
@@ -113,6 +119,11 @@ func (s *Server) stepNPCs(now time.Time) {
 		nav := s.World.NPCNavigation[roomID]
 		players := s.Hub.PlayersInRoom(roomID, "")
 		for _, npc := range actors {
+			if npc.GuidePlayer != "" {
+				if s.Hub.RoomOf(npc.GuidePlayer) != roomID || now.After(npc.guideUntil) {
+					clearGuide(npc)
+				}
+			}
 			focus := ""
 			var targetPlayer hub.PlayerInfo
 			for _, player := range players {
@@ -133,13 +144,37 @@ func (s *Server) stepNPCs(now time.Time) {
 				turnNPC(npc, math.Atan2(targetPlayer.X-npc.X, targetPlayer.Z-npc.Z))
 				continue
 			}
+			if npc.GuidePlayer != "" {
+				owner, ok := s.Hub.Player(npc.GuidePlayer)
+				if !ok {
+					clearGuide(npc)
+					continue
+				}
+				if npc.node == npc.target && npc.node == npc.guideGoal {
+					npc.GuideArrived = true
+					for _, door := range s.World.Rooms[roomID].Doors {
+						if door.Room == npc.GuideRoom {
+							turnNPC(npc, math.Atan2(s.World.Rooms[roomID].Position.X+door.Position.X-npc.X, s.World.Rooms[roomID].Position.Z+door.Position.Z-npc.Z))
+						}
+					}
+					continue
+				}
+				if math.Hypot(owner.X-npc.X, owner.Z-npc.Z) > 3.5 || math.Abs(owner.Y-npc.Y-0.6) > 0.8 {
+					turnNPC(npc, math.Atan2(owner.X-npc.X, owner.Z-npc.Z))
+					continue
+				}
+			}
 			if npc.pause > 0 {
 				npc.pause -= 0.1
 				continue
 			}
 			if npc.node == npc.target {
 				if len(npc.route) == 0 {
-					npc.route = npcRoute(nav, npc.node)
+					if npc.GuidePlayer != "" {
+						npc.route = routeTo(nav, npc.node, npc.guideGoal)
+					} else {
+						npc.route = npcRoute(nav, npc.node)
+					}
 				}
 				if len(npc.route) == 0 {
 					continue
@@ -189,7 +224,7 @@ func (s *Server) stepNPCs(now time.Time) {
 			npc.Y += (point.Y + 1 - npc.Y) * step / distance
 			if step >= distance {
 				npc.node = npc.target
-				if len(npc.route) == 0 {
+				if len(npc.route) == 0 && npc.GuidePlayer == "" {
 					npc.pause = 1 + rand.Float64()*3
 				}
 			}
@@ -220,7 +255,13 @@ func (s *Server) onNpcConversation(client *hub.Client, player *store.Player, msg
 		client.Send(map[string]any{"type": "error", "code": "npc_out_of_reach", "message": "Подойди ближе к персонажу в своей комнате"})
 		return
 	}
-	s.facility.conversations[player.ID] = npcConversation{npcID: msg.NpcID, expires: time.Now().Add(15 * time.Second)}
+	conversation := s.facility.conversations[player.ID]
+	if conversation.npcID != msg.NpcID || !time.Now().Before(conversation.expires) {
+		s.facility.revision++
+		conversation.id = s.facility.revision
+	}
+	conversation.npcID, conversation.expires = msg.NpcID, time.Now().Add(15*time.Second)
+	s.facility.conversations[player.ID] = conversation
 }
 
 func (s *Server) canTalkToNPC(player *store.Player, npcID string) bool {

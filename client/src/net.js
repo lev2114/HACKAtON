@@ -28,6 +28,18 @@ export class Net {
     this.send("npc_conversation", { npcId, active });
   }
 
+  onPlayerState(handler) {
+    this.on("player_state", (message) => handler(message.state));
+  }
+
+  onNpcAction(handler) {
+    this.on("npc_action", handler);
+  }
+
+  useApple() {
+    this.send("use_item", { item: "apple" });
+  }
+
   async register(name, password) {
     return this.#auth("register", name, password);
   }

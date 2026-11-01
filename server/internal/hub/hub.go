@@ -22,8 +22,10 @@ type Client struct {
 	// PlayersInRoom — unexported on purpose, so the only way to touch them
 	// from outside this file is through Hub's locked methods below. Direct
 	// field access here (within the hub package) still goes through h.mu.
-	room    string
-	x, y, z float64
+	room      string
+	x, y, z   float64
+	suitColor string
+	apples    int
 
 	// LastPersistedMoveAt is read/written only from this client's own
 	// read-loop goroutine (never concurrently), so it needs no locking —
@@ -216,14 +218,34 @@ func (h *Hub) UpdatePosition(playerID, room string, x, y, z float64) {
 	h.mu.Unlock()
 }
 
+func (h *Hub) SetWorldState(playerID, color string, apples int) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if c, ok := h.clients[playerID]; ok {
+		c.suitColor, c.apples = color, apples
+	}
+}
+
+func (h *Hub) Player(playerID string) (PlayerInfo, bool) {
+	h.mu.RLock()
+	defer h.mu.RUnlock()
+	c, ok := h.clients[playerID]
+	if !ok {
+		return PlayerInfo{}, false
+	}
+	return PlayerInfo{PlayerID: playerID, Name: c.Name, X: c.x, Y: c.y, Z: c.z, SuitColor: c.suitColor, Apples: c.apples}, true
+}
+
 // PlayerInfo is the live-position shape broadcast for "who's already here"
 // (on room entry) and "who just moved" — see PROTOCOL.md.
 type PlayerInfo struct {
-	PlayerID string  `json:"playerId"`
-	Name     string  `json:"name"`
-	X        float64 `json:"x"`
-	Y        float64 `json:"y"`
-	Z        float64 `json:"z"`
+	PlayerID  string  `json:"playerId"`
+	Name      string  `json:"name"`
+	X         float64 `json:"x"`
+	Y         float64 `json:"y"`
+	Z         float64 `json:"z"`
+	SuitColor string  `json:"suitColor"`
+	Apples    int     `json:"apples"`
 }
 
 // PlayersInRoom lists everyone currently in roomID except exceptPlayerID —
@@ -238,7 +260,7 @@ func (h *Hub) PlayersInRoom(roomID, exceptPlayerID string) []PlayerInfo {
 		if id == exceptPlayerID || c.room != roomID {
 			continue
 		}
-		out = append(out, PlayerInfo{PlayerID: id, Name: c.Name, X: c.x, Y: c.y, Z: c.z})
+		out = append(out, PlayerInfo{PlayerID: id, Name: c.Name, X: c.x, Y: c.y, Z: c.z, SuitColor: c.suitColor, Apples: c.apples})
 	}
 	return out
 }
@@ -266,7 +288,7 @@ func (h *Hub) Snapshot() []ConnectedClient {
 	for id, c := range h.clients {
 		clients = append(clients, c)
 		rows = append(rows, ConnectedClient{
-			PlayerInfo:  PlayerInfo{PlayerID: id, Name: c.Name, X: c.x, Y: c.y, Z: c.z},
+			PlayerInfo:  PlayerInfo{PlayerID: id, Name: c.Name, X: c.x, Y: c.y, Z: c.z, SuitColor: c.suitColor, Apples: c.apples},
 			Room:        c.room,
 			RemoteAddr:  c.RemoteAddr,
 			ConnectedAt: c.ConnectedAt,
