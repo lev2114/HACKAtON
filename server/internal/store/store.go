@@ -73,14 +73,23 @@ func Open(path string) (*Store, error) {
 	if _, err := db.Exec(schema); err != nil {
 		return nil, fmt.Errorf("migrate: %w", err)
 	}
-	// token_expires_at was added after the first version of this schema
-	// shipped — this backfills it on any station.db that predates it.
-	// SQLite has no "ADD COLUMN IF NOT EXISTS", so we just ignore the
-	// "duplicate column" error when it's already there. SQLite also
-	// rejects a non-constant default (CURRENT_TIMESTAMP) on ADD COLUMN, so
-	// this uses a fixed past date instead — existing tokens just read as
-	// already-expired, which only means those sessions need one fresh
-	// login (a new token gets a real TTL via UpdateToken).
+	// Both columns were added after the first version of this schema
+	// shipped (back when login was just `{name}`, no password at all) —
+	// this backfills any station.db that predates them. SQLite has no
+	// "ADD COLUMN IF NOT EXISTS", so each just ignores its own "duplicate
+	// column" error when it's already there.
+	if _, err := db.Exec(`ALTER TABLE players ADD COLUMN password_hash TEXT NOT NULL DEFAULT ''`); err != nil {
+		if !strings.Contains(err.Error(), "duplicate column") {
+			return nil, fmt.Errorf("migrate password_hash: %w", err)
+		}
+	}
+	// SQLite rejects a non-constant default (CURRENT_TIMESTAMP) on ADD
+	// COLUMN, so this uses a fixed past date instead — existing tokens
+	// just read as already-expired, which only means those sessions need
+	// one fresh login (a new token gets a real TTL via UpdateToken). Any
+	// account backfilled with an empty password_hash above similarly just
+	// can't log in with any password — it predates passwords entirely, so
+	// there's nothing correct to log in with; re-registering is the fix.
 	if _, err := db.Exec(`ALTER TABLE players ADD COLUMN token_expires_at DATETIME NOT NULL DEFAULT '1970-01-01 00:00:00'`); err != nil {
 		if !strings.Contains(err.Error(), "duplicate column") {
 			return nil, fmt.Errorf("migrate token_expires_at: %w", err)
