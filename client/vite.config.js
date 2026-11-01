@@ -14,4 +14,11 @@ function gameProxy() {
 export default defineConfig({
   server: { proxy: gameProxy() },
   preview: { proxy: gameProxy() },
+  // Two pages: the game and the admin panel (/admin.html), both served by Go
+  // from dist/ in production.
+  build: {
+    rollupOptions: {
+      input: { main: "index.html", admin: "admin.html" },
+    },
+  },
 });

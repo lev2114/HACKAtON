@@ -1,0 +1,214 @@
+<!doctype html>
+<html lang="ru">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Шаролёт — панель администратора</title>
+    <style>
+      :root {
+        --bg: #070811; --panel: #0f1222; --panel2: #151a30; --line: #232a48;
+        --text: #e3e8ff; --muted: #8a93b8; --accent: #4a7cff; --accent2: #3a6aee;
+        --good: #3ccf8e; --warn: #f0b429; --bad: #ff6b6b;
+      }
+      * { box-sizing: border-box; }
+      html, body { margin: 0; min-height: 100%; background: var(--bg); color: var(--text); font-family: system-ui, sans-serif; font-size: 14px; }
+      button, input, select, textarea { font: inherit; color: inherit; }
+      button {
+        background: var(--accent); border: none; border-radius: 6px; padding: 6px 12px; cursor: pointer; color: #fff;
+      }
+      button:hover { background: var(--accent2); }
+      button.secondary { background: #2b3256; }
+      button.secondary:hover { background: #363e68; }
+      button.danger { background: #a83a3a; }
+      button.danger:hover { background: #c04545; }
+      button:disabled { opacity: .5; cursor: default; }
+      input, select, textarea {
+        background: #0b0e1b; border: 1px solid var(--line); border-radius: 6px; padding: 6px 8px;
+      }
+      textarea { width: 100%; resize: vertical; font-family: ui-monospace, Consolas, monospace; font-size: 13px; }
+      label { display: flex; flex-direction: column; gap: 4px; color: var(--muted); font-size: 12px; }
+      label > input, label > select, label > textarea { color: var(--text); font-size: 14px; }
+      .row { display: flex; gap: 12px; flex-wrap: wrap; align-items: end; }
+      .row > label { flex: 1 1 160px; }
+      .muted { color: var(--muted); }
+      .err { color: var(--bad); min-height: 18px; }
+      .ok { color: var(--good); }
+
+      #login-screen { display: flex; min-height: 100vh; align-items: center; justify-content: center; padding: 16px; }
+      #login-screen form { display: flex; flex-direction: column; gap: 10px; width: min(320px, 100%); }
+      #login-screen h1 { font-size: 20px; margin: 0 0 6px; }
+
+      header {
+        display: flex; align-items: center; gap: 16px; flex-wrap: wrap;
+        padding: 10px 20px; background: var(--panel); border-bottom: 1px solid var(--line); position: sticky; top: 0; z-index: 10;
+      }
+      header h1 { font-size: 16px; margin: 0; }
+      nav { display: flex; gap: 4px; flex-wrap: wrap; }
+      nav button { background: transparent; color: var(--muted); }
+      nav button.active { background: var(--panel2); color: var(--text); }
+      header .spacer { flex: 1; }
+      #conn-state { font-size: 12px; }
+
+      main { padding: 20px; max-width: 1400px; margin: 0 auto; }
+      section { display: none; }
+      section.active { display: block; }
+      h2 { font-size: 15px; margin: 24px 0 10px; color: var(--muted); font-weight: 600; text-transform: uppercase; letter-spacing: .04em; }
+      h2:first-child { margin-top: 0; }
+
+      .cards { display: grid; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); gap: 10px; }
+      .card { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 12px 14px; }
+      .card .v { font-size: 22px; font-weight: 600; font-variant-numeric: tabular-nums; }
+      .card .k { color: var(--muted); font-size: 12px; margin-top: 2px; }
+
+      .box { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 14px; }
+      .table-wrap { overflow-x: auto; background: var(--panel); border: 1px solid var(--line); border-radius: 10px; }
+      table { border-collapse: collapse; width: 100%; font-variant-numeric: tabular-nums; }
+      th, td { text-align: left; padding: 8px 10px; border-bottom: 1px solid var(--line); white-space: nowrap; vertical-align: middle; }
+      th { color: var(--muted); font-weight: 500; font-size: 12px; }
+      tr:last-child td { border-bottom: none; }
+      td.num { text-align: right; }
+      td select { max-width: 150px; }
+      .good { color: var(--good); } .warn { color: var(--warn); } .bad { color: var(--bad); }
+      .pill { display: inline-block; padding: 1px 8px; border-radius: 999px; font-size: 12px; background: #23294a; color: var(--muted); }
+      .pill.on { background: rgba(60, 207, 142, .15); color: var(--good); }
+      svg.spark { display: block; }
+
+      .split { display: grid; grid-template-columns: 260px 1fr; gap: 16px; }
+      @media (max-width: 800px) { .split { grid-template-columns: 1fr; } }
+      .list { display: flex; flex-direction: column; gap: 4px; }
+      .list button { text-align: left; background: var(--panel); color: var(--text); border: 1px solid var(--line); padding: 8px 10px; }
+      .list button.active { border-color: var(--accent); background: var(--panel2); }
+      .list button small { display: block; color: var(--muted); }
+      .editor { display: flex; flex-direction: column; gap: 12px; }
+      .actions { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
+
+      .transcript { display: flex; flex-direction: column; gap: 4px; max-height: 260px; overflow-y: auto; padding: 8px; background: #0b0e1b; border-radius: 6px; }
+      .transcript .user { color: #a8b8d8; }
+      .transcript .assistant { color: #e0e8ff; }
+      .conv { border-top: 1px solid var(--line); padding-top: 10px; margin-top: 10px; }
+
+      .fact { display: grid; grid-template-columns: 140px 140px 1fr auto; gap: 8px; align-items: start; padding: 8px 0; border-bottom: 1px solid var(--line); }
+      @media (max-width: 800px) { .fact { grid-template-columns: 1fr; } }
+    </style>
+  </head>
+  <body>
+    <div id="login-screen">
+      <form id="login-form" novalidate>
+        <h1>Панель администратора</h1>
+        <div class="muted">Вход аккаунтом с правами администратора (ADMIN_USERS на сервере).</div>
+        <input id="login-name" placeholder="Имя" autocomplete="username" required />
+        <input id="login-password" type="password" placeholder="Пароль" autocomplete="current-password" required />
+        <div class="err" id="login-error"></div>
+        <button type="submit">Войти</button>
+      </form>
+    </div>
+
+    <div id="app" hidden>
+      <header>
+        <h1>Шаролёт · админка</h1>
+        <nav id="tabs">
+          <button data-tab="monitor" class="active">Мониторинг</button>
+          <button data-tab="world">Мир</button>
+          <button data-tab="agents">Персонажи</button>
+          <button data-tab="facts">Факты</button>
+          <button data-tab="settings">Настройки</button>
+        </nav>
+        <span class="spacer"></span>
+        <span id="conn-state" class="muted"></span>
+        <button id="logout" class="secondary">Выйти</button>
+      </header>
+
+      <main>
+        <section id="tab-monitor" class="active">
+          <h2>Сервер</h2>
+          <div class="cards" id="server-cards"></div>
+          <h2>Подключённые клиенты</h2>
+          <div class="table-wrap">
+            <table>
+              <thead>
+                <tr>
+                  <th>Игрок</th><th>Комната</th><th class="num" title="Измеряет сервер: ping → pong по WebSocket каждые 2 с. Включает сеть и задержку главного потока браузера (если клиент тормозит, ping растёт)">Ping, мс ⓘ</th><th>Ping, 60 с</th>
+                  <th class="num">FPS</th><th>FPS, 60 с</th><th class="num">Кадр, мс</th>
+                  <th class="num">JS heap, МБ</th><th class="num">Draw calls</th><th class="num">Треугольники</th>
+                  <th>Состояние</th><th>IP</th><th>В игре</th><th>Действия</th>
+                </tr>
+              </thead>
+              <tbody id="clients"></tbody>
+            </table>
+          </div>
+        </section>
+
+        <section id="tab-world">
+          <h2>Объявление всем игрокам</h2>
+          <div class="box">
+            <form id="announce-form" class="row">
+              <label>Текст (до 300 символов)<input id="announce-text" maxlength="300" /></label>
+              <button type="submit">Отправить</button>
+            </form>
+            <div id="announce-status" class="muted"></div>
+          </div>
+          <h2>Игроки по комнатам</h2>
+          <div class="cards" id="room-cards"></div>
+          <h2>Двери</h2>
+          <div class="table-wrap">
+            <table>
+              <thead><tr><th>Комната</th><th>Комната</th><th>Состояние</th><th></th></tr></thead>
+              <tbody id="doors"></tbody>
+            </table>
+          </div>
+          <p class="muted">Открытая дверь сама закроется, когда игрок покинет комнату — так работает игровая логика дверей.</p>
+        </section>
+
+        <section id="tab-agents">
+          <div class="split">
+            <div class="list" id="npc-list"></div>
+            <div id="npc-editor" class="editor"></div>
+          </div>
+        </section>
+
+        <section id="tab-facts">
+          <div class="box editor">
+            <div class="row">
+              <label>Банк фактов<select id="bank-select"></select></label>
+              <div class="actions">
+                <button id="fact-add" class="secondary">+ Факт</button>
+                <button id="facts-save">Сохранить</button>
+                <button id="facts-reset" class="danger">Сбросить к исходным</button>
+              </div>
+            </div>
+            <div id="facts-status" class="muted"></div>
+            <div id="facts"></div>
+          </div>
+        </section>
+
+        <section id="tab-settings">
+          <form id="settings-form" class="box editor">
+            <h2>Игроки</h2>
+            <div class="row">
+              <label>Скорость ходьбы, м/с<input type="number" step="0.5" min="1" max="15" name="walkSpeed" /></label>
+              <label>Скорость бега (Shift), м/с<input type="number" step="0.5" min="1" max="25" name="sprintSpeed" /></label>
+            </div>
+            <h2>ИИ</h2>
+            <div class="row">
+              <label>LLM для всех персонажей<select name="llmEnabled"><option value="true">Включён</option><option value="false">Выключен (только шаблоны)</option></select></label>
+              <label>Модель Ollama<input name="model" /></label>
+            </div>
+            <div class="muted" id="ollama-info"></div>
+            <h2>Уборщики (Roomba)</h2>
+            <div class="row">
+              <label>Движение<select name="cleanersEnabled"><option value="true">Ездят</option><option value="false">Стоят</option></select></label>
+              <label>Скорость (множитель)<input type="number" step="0.1" min="0" max="5" name="cleanerSpeed" /></label>
+            </div>
+            <div class="actions">
+              <button type="submit">Сохранить</button>
+              <button type="button" id="settings-reset" class="danger">Сбросить к исходным</button>
+              <span id="settings-status" class="muted"></span>
+            </div>
+          </form>
+        </section>
+      </main>
+    </div>
+
+    <script type="module" src="/src/admin.js"></script>
+  </body>
+</html>
