@@ -1,12 +1,9 @@
 // Тонкая обёртка над HTTP-логином и WebSocket-каналом.
 // Протокол сообщений описан в /PROTOCOL.md в корне репозитория.
 //
-// В dev-режиме (`npm run dev`) клиент на :5173, сервер на :8080 — разные
-// origin, адрес приходится знать заранее. В проде (`npm run build`, сервер
-// сам раздаёт dist/) клиент и API — один и тот же origin: подставляем его,
-// иначе игрок, зашедший с другого ноутбука по LAN на IP сервера, долбился
-// бы в свой собственный localhost:8080 вместо сервера.
-const DEFAULT_SERVER = import.meta.env.DEV ? "http://localhost:8080" : window.location.origin;
+// Vite dev/preview proxy /api and /ws to Go; production is served by Go itself.
+// In all modes, the browser uses the same origin for the page and game traffic.
+const DEFAULT_SERVER = window.location.origin;
 
 export class Net {
   constructor(serverUrl = DEFAULT_SERVER) {
@@ -25,7 +22,7 @@ export class Net {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ name }),
     });
-    if (!res.ok) throw new Error(`login failed: ${res.status}`);
+    if (!res.ok) throw new Error(`Сервер ${this.serverUrl} не выполнил вход (HTTP ${res.status}). Проверь, что Go-сервер запущен.`);
     return res.json();
   }
 
@@ -47,7 +44,11 @@ export class Net {
 
     return new Promise((resolve, reject) => {
       this.ws.onopen = () => resolve();
-      this.ws.onerror = (err) => reject(err);
+      this.ws.onerror = () => reject(new Error(`Не удалось открыть WebSocket: ${this.serverUrl}. Проверь Go-сервер.`));
+      this.ws.onclose = () => {
+        reject(new Error(`Соединение с ${this.serverUrl} закрыто.`));
+        this.handlers.disconnect?.();
+      };
     });
   }
 
