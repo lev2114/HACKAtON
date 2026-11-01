@@ -481,8 +481,13 @@ renderer.domElement.addEventListener("click", () => {
 
 let yaw = 0;
 let pitch = 0;
+// Chrome на Windows с захваченным курсором изредка присылает одно событие
+// со сдвигом в сотни пикселей — камера "телепортируется". Реальная мышь
+// за одно событие (~1–8 мс) так далеко не уезжает, такие выбросы пропускаем.
+const MAX_MOUSE_DELTA = 300;
 document.addEventListener("mousemove", (e) => {
   if (document.pointerLockElement !== renderer.domElement) return;
+  if (Math.abs(e.movementX) > MAX_MOUSE_DELTA || Math.abs(e.movementY) > MAX_MOUSE_DELTA) return;
   yaw -= e.movementX * 0.0025;
   pitch -= e.movementY * 0.0025;
   pitch = Math.max(-1.2, Math.min(1.2, pitch));
