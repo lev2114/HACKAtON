@@ -1,11 +1,13 @@
 import * as THREE from "three";
 import { Net } from "./net.js";
 import { buildRoom, destroyRoom } from "./world.js";
+import { createCosmicSky } from "./sky.js";
 
 const net = new Net();
 
 const scene = new THREE.Scene();
-scene.background = new THREE.Color(0x05060a);
+// Transparent world backdrop: the persistent sky is drawn underneath it.
+const cosmicSky = createCosmicSky();
 
 const camera = new THREE.PerspectiveCamera(70, window.innerWidth / window.innerHeight, 0.1, 500);
 camera.position.set(0, 1.6, 5);
@@ -386,7 +388,7 @@ function tick() {
     net.send("move", { x: camera.position.x, y: camera.position.y, z: camera.position.z });
   }
 
-  renderer.render(scene, camera);
+  cosmicSky.render(renderer, scene, camera);
   requestAnimationFrame(tick);
 }
 
