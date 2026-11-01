@@ -3,7 +3,9 @@ import * as THREE from "three";
 const HEIGHT = 1.7;
 // Per-character size tweak by NPC id, on top of HEIGHT: Krosh's height
 // includes his long ears, so at 1.7 m his body looked smaller than the rest.
-const SIZE_BY_NPC = { krosh: 1.3 };
+// 1.5 was measured: his widest point is 1.30 m vs a 1.94 m median for the
+// others, and his body (without ears) is ~55% of his height vs ~85%.
+const SIZE_BY_NPC = { krosh: 1.5 };
 // Fractions of each model's full height, including hats/antlers/ears.
 // Round bodies have no separate neck: keep the face, hat and body together.
 const profiles = {
