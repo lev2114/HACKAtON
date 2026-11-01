@@ -58,6 +58,7 @@ type ClientStats struct {
 	Triangles  int       `json:"triangles"`
 	Paused     bool      `json:"paused"`
 	ChatOpen   bool      `json:"chatOpen"`
+	GPU        string    `json:"gpu"`
 	Dropped    int       `json:"droppedMessages"`
 	LastReport time.Time `json:"lastReport"`
 }

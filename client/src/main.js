@@ -46,7 +46,18 @@ const camera = new THREE.PerspectiveCamera(70, window.innerWidth / window.innerH
 camera.position.set(0, 1.6, 5);
 camera.rotation.order = "YXZ";
 
-const renderer = new THREE.WebGLRenderer({ antialias: true });
+// На ноутбуках с двумя видеокартами браузер по умолчанию берёт встроенную:
+// на Intel UHD вестибюль даёт ~8 FPS, на GTX 1660 Ti — ~200. Это только
+// подсказка браузеру (Windows может её игнорировать) — надёжно помогает
+// "Высокая производительность" для браузера в настройках графики Windows.
+const renderer = new THREE.WebGLRenderer({ antialias: true, powerPreference: "high-performance" });
+
+// Имя видеокарты для админки: сразу видно, кто играет на встроенной.
+const gpuName = (() => {
+  const gl = renderer.getContext();
+  const ext = gl.getExtension("WEBGL_debug_renderer_info");
+  return String(ext ? gl.getParameter(ext.UNMASKED_RENDERER_WEBGL) : gl.getParameter(gl.RENDERER)).slice(0, 160);
+})();
 renderer.setSize(window.innerWidth, window.innerHeight);
 document.body.appendChild(renderer.domElement);
 
@@ -393,6 +404,7 @@ net.on("ping", (msg) => {
     memoryMB: performance.memory ? Math.round(performance.memory.usedJSHeapSize / 1048576) : 0,
     drawCalls: info.calls,
     triangles: info.triangles,
+    gpu: gpuName,
     paused,
     chatOpen,
   });

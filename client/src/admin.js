@@ -231,6 +231,10 @@ function renderClients(clients, serverTime) {
     cells.mem.textContent = c.stats.memoryMB ? fmt(c.stats.memoryMB, 0) : "—";
     cells.draws.textContent = reported ? c.stats.drawCalls : "…";
     cells.tris.textContent = reported ? c.stats.triangles.toLocaleString("ru") : "…";
+    const gpu = c.stats.gpu || "";
+    cells.gpu.textContent = gpu.replace(/^ANGLE \((.*)\)$/, "$1").replace(/ \(0x[0-9A-F]+\)| Direct3D.*$|, D3D.*$/gi, "") || "…";
+    cells.gpu.title = gpu;
+    cells.gpu.className = /intel|uhd|iris|swiftshader|llvmpipe|microsoft basic/i.test(gpu) ? "bad" : "";
     const state = [];
     if (c.stats.chatOpen) state.push("в диалоге");
     if (c.stats.paused) state.push("пауза");
@@ -248,7 +252,7 @@ function renderClients(clients, serverTime) {
     history.delete(id);
   }
   if (!clients.length) {
-    tbody.replaceChildren(h("tr", {}, h("td", { colspan: 14, class: "muted" }, "Никто не подключён")));
+    tbody.replaceChildren(h("tr", {}, h("td", { colspan: 15, class: "muted" }, "Никто не подключён")));
   } else {
     for (const row of tbody.querySelectorAll("tr:not([data-player])")) row.remove();
   }
@@ -298,7 +302,7 @@ function createClientRow(c) {
     { "data-player": c.playerId },
     td("name"), td("room"), td("ping", "num"), td("pingSpark"), td("fps", "num"), td("fpsSpark"),
     td("frame", "num"), td("mem", "num"), td("draws", "num"), td("tris", "num"),
-    td("state"), td("ip", "muted"), td("since"), actions
+    td("gpu"), td("state"), td("ip", "muted"), td("since"), actions
   );
   const row = { tr, cells };
   clientRows.set(c.playerId, row);

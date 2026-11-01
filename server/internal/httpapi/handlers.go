@@ -385,6 +385,7 @@ type incoming struct {
 	Triangles int     `json:"triangles"`
 	Paused    bool    `json:"paused"`
 	ChatOpen  bool    `json:"chatOpen"`
+	GPU       string  `json:"gpu"`
 }
 
 const pingInterval = 2 * time.Second
@@ -407,6 +408,13 @@ func (s *Server) pingLoop(client *hub.Client, stop <-chan struct{}) {
 	}
 }
 
+func truncate(s string, n int) string {
+	if r := []rune(s); len(r) > n {
+		return string(r[:n])
+	}
+	return s
+}
+
 func (s *Server) onPong(client *hub.Client, msg incoming) {
 	clamp := func(v, max float64) float64 {
 		if math.IsNaN(v) || v < 0 {
@@ -422,6 +430,7 @@ func (s *Server) onPong(client *hub.Client, msg incoming) {
 		Triangles: max(msg.Triangles, 0),
 		Paused:    msg.Paused,
 		ChatOpen:  msg.ChatOpen,
+		GPU:       truncate(msg.GPU, 160),
 	})
 }
 
