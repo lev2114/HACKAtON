@@ -1,49 +1,102 @@
 {
+  "krosh": {
+    "id": "krosh",
+    "name": "Крош",
+    "roomId": "hub",
+    "title": "проводник станции",
+    "personality": "Энергичный, импульсивный, всё время прыгает и шутит, объясняет физику через свои неудачные попытки что-то подпрыгнуть или удержать равновесие.",
+    "position": { "x": 2, "y": 1.055, "z": 1 },
+    "factBank": "krosh",
+    "model": "/models/krosh-character.glb"
+  },
+  "sovunya": {
+    "id": "sovunya",
+    "name": "Совунья",
+    "roomId": "room_medbay",
+    "title": "врач станции",
+    "personality": "Заботливая, энергичная и рассудительная. Даёт понятные советы о здоровье и питании космонавтов.",
+    "position": { "x": -30, "y": 1.055, "z": -12 },
+    "factBank": "sovunya",
+    "model": "/models/sovunya-character.glb"
+  },
+  "pin": {
+    "id": "pin",
+    "name": "Пин",
+    "roomId": "room_rockets",
+    "title": "главный инженер",
+    "personality": "Деловитый изобретатель-пингвин, говорит короткими чёткими фразами, обожает технику и историю космонавтики, иногда вставляет 'сконструировал', 'испытал'.",
+    "position": { "x": -20, "y": 1.055, "z": -30 },
+    "factBank": "pin",
+    "model": "/models/pin-character.glb"
+  },
+  "kopatych": {
+    "id": "kopatych",
+    "name": "Копатыч",
+    "roomId": "room_greenhouse",
+    "title": "биолог и садовод",
+    "personality": "Добродушный и трудолюбивый садовод. Объясняет биологию и выращивание растений простыми практическими примерами.",
+    "position": { "x": -13, "y": 1.055, "z": 14 },
+    "factBank": "kopatych",
+    "model": "/models/kopatych-character.glb"
+  },
+  "losyash_chemistry": {
+    "id": "losyash_chemistry",
+    "name": "Лосяш",
+    "roomId": "room_chemistry",
+    "title": "химик станции",
+    "personality": "Увлечённый учёный-эрудит, говорит обстоятельно, иногда занудно, любит точные цифры и сложные слова, но объясняет их простыми словами, если собеседник не понял.",
+    "position": { "x": -21.956, "y": 1.055, "z": -79.928 },
+    "factBank": "chemistry",
+    "model": "/models/losyash-character.glb"
+  },
+  "karich": {
+    "id": "karich",
+    "name": "Кар-Карыч",
+    "roomId": "room_radio",
+    "title": "оператор радиосвязи",
+    "personality": "Артистичный, доброжелательный и опытный. Объясняет радиосвязь через короткие истории.",
+    "position": { "x": 0.009, "y": 1.055, "z": -83 },
+    "factBank": "radio",
+    "model": "/models/karich-character.glb"
+  },
   "losyash": {
     "id": "losyash",
     "name": "Лосяш",
     "roomId": "room_stars",
     "title": "астрофизик станции",
     "personality": "Увлечённый учёный-эрудит, говорит обстоятельно, иногда занудно, любит точные цифры и сложные слова, но объясняет их простыми словами, если собеседник не понял.",
-    "position": { "x": 0, "y": 1, "z": -21 },
-    "factBank": "losyash"
+    "position": { "x": 0, "y": 1.055, "z": -24 },
+    "factBank": "losyash",
+    "model": "/models/losyash-character.glb"
   },
-  "krosh": {
-    "id": "krosh",
-    "name": "Крош",
-    "roomId": "room_gravity",
-    "title": "испытатель невесомости",
-    "personality": "Энергичный, импульсивный, всё время прыгает и шутит, объясняет физику через свои неудачные попытки что-то подпрыгнуть или удержать равновесие.",
-    "position": { "x": 20, "y": 1, "z": -6 },
-    "factBank": "krosh"
-  },
-  "pin": {
-    "id": "pin",
-    "name": "Пин",
-    "roomId": "room_rockets",
-    "title": "главный инженер-изобретатель",
-    "personality": "Деловитый изобретатель-пингвин, говорит короткими чёткими фразами, обожает технику и историю космонавтики, иногда вставляет 'сконструировал', 'испытал'.",
-    "position": { "x": -20, "y": 1, "z": -29 },
-    "factBank": "pin",
-    "model": "/models/pin-character.glb"
+  "yozhik": {
+    "id": "yozhik",
+    "name": "Ёжик",
+    "roomId": "room_library",
+    "title": "библиотекарь станции",
+    "personality": "Спокойный, внимательный и немного застенчивый. Любит книги, коллекции и точные объяснения.",
+    "position": { "x": 42.248, "y": 1.055, "z": -70.935 },
+    "factBank": "library",
+    "model": "/models/yozhik-character.glb"
   },
   "nyusha": {
     "id": "nyusha",
     "name": "Нюша",
-    "roomId": "room_greenhouse",
-    "title": "биолог-садовод",
-    "personality": "Немного тщеславная, но искренне увлечённая, часто сравнивает факты о космосе с заботой о своей внешности и здоровье, кокетливая, но по делу.",
-    "position": { "x": -13, "y": 1, "z": 17 },
-    "factBank": "nyusha"
+    "roomId": "room_gravity",
+    "title": "специалист по скафандрам",
+    "personality": "Общительная и любознательная. Объясняет устройство скафандров и безопасность выхода в космос.",
+    "position": { "x": 20, "y": 1.055, "z": -9 },
+    "factBank": "suits",
+    "model": "/models/nyusha-character.glb"
   },
-  "karich": {
-    "id": "karich",
-    "name": "Карыч",
-    "roomId": "room_medbay",
-    "title": "смотритель медблока",
-    "personality": "Спокойный, артистичный и заботливый Карыч. Делится опытом, объясняет здоровье космонавтов простыми словами, любит короткие истории и практические советы.",
-    "position": { "x": -30, "y": 1, "z": -11 },
-    "factBank": "karich",
-    "model": "/models/karich-character.glb"
+  "sovunya_dining": {
+    "id": "sovunya_dining",
+    "name": "Совунья",
+    "roomId": "room_dining",
+    "title": "заведующая столовой",
+    "personality": "Заботливая, энергичная и рассудительная. Даёт понятные советы о здоровье и питании космонавтов.",
+    "position": { "x": 71.749, "y": 1.055, "z": -37.386 },
+    "factBank": "cafeteria",
+    "model": "/models/sovunya-character.glb"
   }
 }

@@ -1,6 +1,7 @@
-// Package world loads rooms, NPCs, and facts from disk, and serves them
-// as chunks to the client. The client is only allowed to cache the chunk
-// for the room the player is currently in (≤10% of total world data).
+// Package world loads the static station data (rooms, NPCs, facts) from
+// JSON files and answers the two questions the rest of the server needs:
+// "what does this room look like" (Chunk) and "what should this NPC say
+// next to this specific player" (PickFact).
 package world
 
 import (
@@ -17,32 +18,37 @@ type Vec3 struct {
 	Z float64 `json:"z"`
 }
 
-type Size struct {
+type Size3 struct {
 	W float64 `json:"w"`
 	H float64 `json:"h"`
 	D float64 `json:"d"`
 }
 
-type Doorway struct {
+type Room struct {
+	ID         string   `json:"id"`
+	Name       string   `json:"name"`
+	Position   Vec3     `json:"position"`
+	Size       Size3    `json:"size"`
+	Color      string   `json:"color"`
+	NpcID      *string  `json:"npcId"`
+	ConnectsTo []string `json:"connectsTo"`
+	// Model is an optional URL (served by the client's static files) to a
+	// .glb scene that replaces the procedural box geometry for this room.
+	Model      string  `json:"model,omitempty"`
+	ModelScale float64 `json:"modelScale,omitempty"`
+	Radius     float64 `json:"radius,omitempty"`
+	Spawn      *Vec3   `json:"spawn,omitempty"`
+	Doors      []Door  `json:"doors,omitempty"`
+	// Walkmesh enables client-side floors, stairs and wall collision from GLB.
+	Collision string `json:"collision,omitempty"`
+}
+
+// Door positions are local to the room, matching its authored GLB coordinates.
+type Door struct {
 	Room      string  `json:"room"`
 	Position  Vec3    `json:"position"`
 	HalfWidth float64 `json:"halfWidth"`
 	ModelDoor string  `json:"modelDoor,omitempty"`
-}
-
-type Room struct {
-	ID         string    `json:"id"`
-	Name       string    `json:"name"`
-	Position   Vec3      `json:"position"`
-	Size       Size      `json:"size"`
-	Color      string    `json:"color"`
-	Model      string    `json:"model,omitempty"`
-	ModelScale float64   `json:"modelScale,omitempty"`
-	Radius     float64   `json:"radius,omitempty"`
-	Spawn      *Vec3     `json:"spawn,omitempty"`
-	Doors      []Doorway `json:"doors,omitempty"`
-	NPCID      string    `json:"npcId"`
-	ConnectsTo []string  `json:"connectsTo"`
 }
 
 type NPC struct {
@@ -63,65 +69,34 @@ type Fact struct {
 	Text       string `json:"text"`
 }
 
-// World holds the static dataset loaded once at server startup.
 type World struct {
 	Rooms map[string]Room
 	NPCs  map[string]NPC
-	Facts map[string][]Fact // npcId -> facts
+	Facts map[string][]Fact // keyed by NPC factBank id
 }
 
 func Load(dir string) (*World, error) {
-	roomsPath := filepath.Join(dir, "rooms.json")
-	npcsPath := filepath.Join(dir, "npcs.json")
-	factsPath := filepath.Join(dir, "facts.json")
+	w := &World{}
 
-	rooms, err := loadJSON[map[string]Room](roomsPath)
-	if err != nil {
-		return nil, fmt.Errorf("rooms: %w", err)
+	if err := loadJSON(filepath.Join(dir, "rooms.json"), &w.Rooms); err != nil {
+		return nil, fmt.Errorf("rooms.json: %w", err)
+	}
+	if err := loadJSON(filepath.Join(dir, "npcs.json"), &w.NPCs); err != nil {
+		return nil, fmt.Errorf("npcs.json: %w", err)
+	}
+	if err := loadJSON(filepath.Join(dir, "facts.json"), &w.Facts); err != nil {
+		return nil, fmt.Errorf("facts.json: %w", err)
 	}
 
-	npcs, err := loadJSON[map[string]NPC](npcsPath)
-	if err != nil {
-		return nil, fmt.Errorf("npcs: %w", err)
-	}
-
-	facts, err := loadJSON[map[string][]Fact](factsPath)
-	if err != nil {
-		return nil, fmt.Errorf("facts: %w", err)
-	}
-
-	return &World{Rooms: rooms, NPCs: npcs, Facts: facts}, nil
+	return w, nil
 }
 
-func loadJSON[T any](path string) (T, error) {
-	var zero T
-	data, err := os.ReadFile(path)
+func loadJSON(path string, out any) error {
+	raw, err := os.ReadFile(path)
 	if err != nil {
-		return zero, err
+		return err
 	}
-	var out T
-	if err := json.Unmarshal(data, &out); err != nil {
-		return zero, err
-	}
-	return out, nil
-}
-
-// ChunkData is what gets sent to the client when entering a room.
-// Note: facts are deliberately excluded — they are sent strictly on demand
-// via npc_talk to enforce the ≤10% client cache limit.
-type ChunkData struct {
-	Room      Room       `json:"room"`
-	NPCs      []NPCStub  `json:"npcs"`
-	Neighbors []RoomStub `json:"neighbors"`
-}
-
-// RoomStub gives neighboring rooms' bounds for client-side wall collision
-// without leaking their NPCs or facts.
-type RoomStub struct {
-	ID       string `json:"id"`
-	Name     string `json:"name"`
-	Position Vec3   `json:"position"`
-	Size     Size   `json:"size"`
+	return json.Unmarshal(raw, out)
 }
 
 type NPCStub struct {
@@ -132,7 +107,19 @@ type NPCStub struct {
 	Model    string `json:"model,omitempty"`
 }
 
-// Chunk returns the minimal data needed to render roomID and talk to its NPC.
+type RoomStub struct {
+	ID       string `json:"id"`
+	Name     string `json:"name"`
+	Position Vec3   `json:"position"`
+	Size     Size3  `json:"size"`
+}
+
+type ChunkData struct {
+	Room      Room       `json:"room"`
+	NPCs      []NPCStub  `json:"npcs"`
+	Neighbors []RoomStub `json:"neighbors"`
+}
+
 func (w *World) Chunk(roomID string) (*ChunkData, bool) {
 	room, ok := w.Rooms[roomID]
 	if !ok {
@@ -140,15 +127,9 @@ func (w *World) Chunk(roomID string) (*ChunkData, bool) {
 	}
 
 	var npcs []NPCStub
-	for _, npc := range w.NPCs {
-		if npc.RoomID == roomID {
-			npcs = append(npcs, NPCStub{
-				ID:       npc.ID,
-				Name:     npc.Name,
-				Title:    npc.Title,
-				Position: npc.Position,
-				Model:    npc.Model,
-			})
+	for _, n := range w.NPCs {
+		if n.RoomID == roomID {
+			npcs = append(npcs, NPCStub{ID: n.ID, Name: n.Name, Title: n.Title, Position: n.Position, Model: n.Model})
 		}
 	}
 
@@ -165,11 +146,9 @@ func (w *World) Chunk(roomID string) (*ChunkData, bool) {
 }
 
 // ---------------------------------------------------------------------------
-// Keyword-based topic matching (FSM brain)
+// Keyword-based topic matching
 // ---------------------------------------------------------------------------
 
-// TopicKeywords maps Russian keywords the player might type to fact topic IDs.
-// Simple substring matching — no ML, works offline, fast.
 var TopicKeywords = map[string][]string{
 	"stars":      {"звезд", "звёзд", "солнц", "полярн", "светил"},
 	"blackholes": {"чёрн", "черн", "дыр", "горизонт событ", "сингуляр"},
@@ -192,10 +171,12 @@ var TopicKeywords = map[string][]string{
 	"sleep":      {"сон в космосе", "спать в космосе", "режим сна", "сутки на орбит"},
 	"return":     {"реабилитац", "возвращен на земл", "после полёт", "после полет"},
 	"psychology": {"психолог", "изоляц", "экипаж"},
+	"chemistry":  {"хими", "элемент", "веществ", "реакци", "молекул", "таблиц менделеев"},
+	"radio":      {"радио", "связь", "сигнал", "антенн", "передач", "волн"},
+	"library":    {"книг", "библиотек", "архив", "знани", "журнал", "коллекци"},
+	"suits":      {"скафандр", "герметичн", "шлем", "выход в открытый космос", "костюм"},
 }
 
-// matchTopics extracts topic IDs from a player's message by simple keyword
-// substring matching. Returns matched topics in order found.
 func matchTopics(message string) []string {
 	lower := strings.ToLower(message)
 	var matched []string
@@ -212,7 +193,6 @@ func matchTopics(message string) []string {
 	return matched
 }
 
-// isGeneralFactRequest checks if the player explicitly asked for a fact or general space info
 func isGeneralFactRequest(message string) bool {
 	lower := strings.ToLower(strings.TrimSpace(message))
 	triggers := []string{
@@ -247,21 +227,23 @@ func isGeneralFactRequest(message string) bool {
 //  1. The player's question matches a topic that THIS NPC specializes in.
 //  2. The player explicitly asks to tell a fact or something interesting.
 //
-// If the player asks small-talk ("как дела?") or an off-topic question ("как испечь блинчики?"),
+// If the player asks small-talk or an off-topic question,
 // it returns fact = nil so the NPC can respond conversationally or decline off-topic.
 func (w *World) PickFact(npcID string, message string, told map[string]bool) (fact *Fact, isRepeat bool, availableTopics []string) {
-	bank := w.Facts[npcID]
+	npc, ok := w.NPCs[npcID]
+	if !ok {
+		return nil, false, nil
+	}
+	bank := w.Facts[npc.FactBank]
 	if len(bank) == 0 {
 		return nil, false, nil
 	}
 
-	// Topics of THIS NPC
 	npcTopics := map[string]bool{}
 	for _, f := range bank {
 		npcTopics[f.Topic] = true
 	}
 
-	// Collect topics that still have untold facts for this NPC
 	topicSet := map[string]bool{}
 	for _, f := range bank {
 		if !told[f.ID] {
@@ -272,10 +254,8 @@ func (w *World) PickFact(npcID string, message string, told map[string]bool) (fa
 		availableTopics = append(availableTopics, t)
 	}
 
-	// Try to match player's question to a topic
 	matchedTopics := matchTopics(message)
 
-	// Keep only topics this NPC actually specializes in
 	var relevantTopics []string
 	for _, t := range matchedTopics {
 		if npcTopics[t] {
@@ -292,7 +272,7 @@ func (w *World) PickFact(npcID string, message string, told map[string]bool) (fa
 		}
 	}
 
-	// 2. Topic-matched but already told (repeat, but relevant to the question)
+	// 2. Topic-matched but already told
 	for _, topic := range relevantTopics {
 		for i := range bank {
 			if bank[i].Topic == topic {
@@ -308,11 +288,9 @@ func (w *World) PickFact(npcID string, message string, told map[string]bool) (fa
 				return &bank[i], false, availableTopics
 			}
 		}
-		// All told — repeat last fact
 		return &bank[len(bank)-1], true, availableTopics
 	}
 
-	// 4. Neither topic match nor general fact request:
-	// Return nil so the NPC can answer small talk or decline off-topic questions.
+	// 4. Return nil for conversational speech or off-topic questions
 	return nil, false, availableTopics
 }

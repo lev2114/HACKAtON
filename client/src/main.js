@@ -1,11 +1,44 @@
 import * as THREE from "three";
 import { Net } from "./net.js";
 import { buildRoom, destroyRoom } from "./world.js";
+import { createCosmicSky } from "./sky.js";
+
+// Рисуем приглушённый звёздный фон для экрана входа один раз на canvas и
+// подставляем как CSS-фон — не трогает игровую сцену/рендер-луп (тот
+// стартует только после успешного логина).
+function paintLoginStarfield(el) {
+  const canvas = document.createElement("canvas");
+  canvas.width = 900;
+  canvas.height = 900;
+  const ctx = canvas.getContext("2d");
+
+  const grad = ctx.createRadialGradient(280, 200, 0, 280, 200, 800);
+  grad.addColorStop(0, "#140b26");
+  grad.addColorStop(0.5, "#08070f");
+  grad.addColorStop(1, "#030308");
+  ctx.fillStyle = grad;
+  ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+  for (let i = 0; i < 260; i++) {
+    const x = Math.random() * canvas.width;
+    const y = Math.random() * canvas.height;
+    const r = Math.random() < 0.85 ? Math.random() * 0.7 + 0.3 : Math.random() * 1.3 + 0.8;
+    const alpha = Math.random() * 0.5 + 0.25;
+    ctx.beginPath();
+    ctx.arc(x, y, r, 0, Math.PI * 2);
+    ctx.fillStyle = `rgba(255,255,255,${alpha})`;
+    ctx.fill();
+  }
+
+  el.style.backgroundImage = `url(${canvas.toDataURL()})`;
+  el.style.backgroundSize = "cover";
+}
 
 const net = new Net();
 
 const scene = new THREE.Scene();
-scene.background = new THREE.Color(0x05060a);
+// Transparent world backdrop: the persistent sky is drawn underneath it.
+const cosmicSky = createCosmicSky();
 
 const camera = new THREE.PerspectiveCamera(70, window.innerWidth / window.innerHeight, 0.1, 500);
 camera.position.set(0, 1.6, 5);
@@ -32,11 +65,43 @@ window.addEventListener("resize", () => {
 const players = new Map(); // playerId -> THREE.Mesh
 window.__sharolet.players = players; // для отладки/автотестов, см. строку 18
 let currentRoomBuilt = null;
+let roomCleanup = Promise.resolve();
+let roomVersion = 0;
 let myId = null;
 let myName = null;
 let disconnected = false;
+let running = false; // тик идёт только пока мы реально в игре (не на логине/паузе)
+let paused = false;
+
+// "Запомнить меня": токен сессии живёт в localStorage, чтобы обновление
+// страницы не требовало повторного ввода пароля. Хранить сам пароль нельзя,
+// а токен — такой же bearer-секрет, как cookie сессии, поэтому logout явно
+// его стирает (см. stopGame).
+const SESSION_KEY = "sharolet.session";
+function saveSession(token, name) {
+  try {
+    localStorage.setItem(SESSION_KEY, JSON.stringify({ token, name }));
+  } catch {
+    // приватный режим / заблокировано — просто не запоминаем, не критично
+  }
+}
+function loadSession() {
+  try {
+    return JSON.parse(localStorage.getItem(SESSION_KEY));
+  } catch {
+    return null;
+  }
+}
+function clearSession() {
+  try {
+    localStorage.removeItem(SESSION_KEY);
+  } catch {
+    // ignore
+  }
+}
 
 const hud = document.getElementById("hud");
+const chatBox = document.getElementById("chat");
 
 // ── NPC-диалог: DOM-элементы ──
 const npcHint = document.getElementById("npc-hint");
@@ -55,10 +120,12 @@ let chatWaiting = false;    // ждём ответ от сервера
 let thinkingEl = null;      // элемент "думает..."
 
 function updateHud() {
-  if (!currentRoomBuilt) return;
   hud.textContent = disconnected
     ? "Соединение потеряно. Проверь сервер и обнови страницу."
-    : `${myName} · ${currentRoomBuilt.room.name} · Игроков в комнате: ${players.size + 1}`;
+    : !currentRoomBuilt ? "Переход в следующий отсек…"
+    : currentRoomBuilt.error || (!currentRoomBuilt.ready
+      ? `Загрузка: ${currentRoomBuilt.room.name}…`
+      : `${myName} · ${currentRoomBuilt.room.name} · Игроков в комнате: ${players.size + 1}`);
 }
 
 // ── Открытие / закрытие диалога ──
@@ -74,15 +141,12 @@ function openChat(npcId, npcName) {
   npcDialog.style.display = "flex";
   npcHint.style.display = "none";
 
-  // Разблокируем курсор, чтобы можно было печатать
   if (document.pointerLockElement) {
     document.exitPointerLock();
   }
 
-  // Фокус на поле ввода
   setTimeout(() => npcDialogInput.focus(), 60);
 
-  // Отправляем первое приветственное сообщение
   addMessage("Вы", "Привет!", true);
   chatWaiting = true;
   showThinking();
@@ -100,16 +164,13 @@ function closeChat() {
   npcDialogInput.value = "";
   npcDialogInput.blur();
 
-  // Возвращаем pointer lock
-  renderer.domElement.requestPointerLock();
+  if (running && !paused) {
+    renderer.domElement.requestPointerLock();
+  }
 }
 
-// ── Сообщения в чате ──
-
 function addMessage(author, text, isUser) {
-  // Убираем "думает..." если есть
   removeThinking();
-
   const div = document.createElement("div");
   div.className = isUser ? "msg user" : "msg npc";
   div.innerHTML = `<span class="author">${escapeHtml(author)}:</span> ${escapeHtml(text)}`;
@@ -139,8 +200,6 @@ function escapeHtml(str) {
   return div.innerHTML;
 }
 
-// ── Отправка сообщения игрока ──
-
 function sendPlayerMessage() {
   const text = npcDialogInput.value.trim();
   if (!text || !chatOpen || chatWaiting) return;
@@ -153,37 +212,56 @@ function sendPlayerMessage() {
   net.send("npc_talk", { npcId: chatNpcId, message: text });
 }
 
-// Кнопка отправки
 npcDialogSend.addEventListener("click", sendPlayerMessage);
 
-// Enter в поле ввода
 npcDialogInput.addEventListener("keydown", (e) => {
   if (e.key === "Enter") {
     e.preventDefault();
     sendPlayerMessage();
   }
-  // Не даём клавишам WASD и E улетать в game-обработчик
   e.stopPropagation();
 });
 
-// Кнопка закрытия
 npcDialogClose.addEventListener("click", closeChat);
 
-// ── Deprecated: старый showChat — теперь не используется напрямую ──
-// Оставлен для обратной совместимости, если сервер пришлёт ответ вне диалога.
 function showChat(name, text) {
   if (chatOpen && chatNpcId) {
     removeThinking();
     addMessage(name, text, false);
     chatWaiting = false;
-    // Разблокируем ввод
     npcDialogInput.disabled = false;
     npcDialogSend.disabled = false;
     setTimeout(() => npcDialogInput.focus(), 30);
+  } else {
+    chatBox.style.display = "block";
+    chatBox.innerHTML = `<span class="name">${name}:</span>${text}`;
   }
 }
 
-function spawnPlayerMesh(id, x, y, z) {
+// Канвас-текстура с именем, billboard (THREE.Sprite всегда смотрит на
+// камеру сам, не нужно вручную разворачивать на каждом кадре).
+function makeNameTag(name) {
+  const canvas = document.createElement("canvas");
+  canvas.width = 256;
+  canvas.height = 64;
+  const ctx = canvas.getContext("2d");
+  ctx.fillStyle = "rgba(10, 12, 24, 0.75)";
+  ctx.fillRect(0, 16, 256, 32);
+  ctx.font = "bold 28px system-ui, sans-serif";
+  ctx.textAlign = "center";
+  ctx.textBaseline = "middle";
+  ctx.fillStyle = "#e8ecff";
+  ctx.fillText(name, 128, 33);
+
+  const texture = new THREE.CanvasTexture(canvas);
+  const sprite = new THREE.Sprite(new THREE.SpriteMaterial({ map: texture, depthTest: false }));
+  sprite.scale.set(1.6, 0.4, 1);
+  sprite.position.y = 1.3; // над капсулой
+  sprite.renderOrder = 1; // поверх стен/моделей комнаты
+  return sprite;
+}
+
+function spawnPlayerMesh(id, name, x, y, z) {
   const existing = players.get(id);
   if (existing) {
     existing.position.set(x, y, z);
@@ -193,6 +271,7 @@ function spawnPlayerMesh(id, x, y, z) {
   const mat = new THREE.MeshStandardMaterial({ color: 0x66ccff });
   const mesh = new THREE.Mesh(geo, mat);
   mesh.position.set(x, y, z);
+  mesh.add(makeNameTag(name || "?"));
   scene.add(mesh);
   players.set(id, mesh);
   return mesh;
@@ -204,15 +283,23 @@ function removePlayerMesh(id) {
   scene.remove(mesh);
   mesh.geometry.dispose();
   mesh.material.dispose();
+  for (const child of mesh.children) {
+    if (child.material?.map) child.material.map.dispose();
+    child.material?.dispose();
+  }
   players.delete(id);
 }
 
 // On transitions, place the player just inside the matching return doorway
 // (computeEntryPoint). roster — те, кто уже стоит в комнате, см. ниже.
-function enterChunk(chunk, teleport, roster) {
-  destroyRoom(scene, currentRoomBuilt);
+async function enterChunk(chunk, teleport, roster) {
+  const version = ++roomVersion;
+  const previous = currentRoomBuilt;
+  currentRoomBuilt = null;
+  // Serialize cleanup, including any GLB parse still in flight. The next
+  // room cannot start downloading until the previous one's resources are gone.
+  roomCleanup = roomCleanup.then(() => destroyRoom(scene, previous));
   for (const id of [...players.keys()]) removePlayerMesh(id);
-  currentRoomBuilt = buildRoom(scene, chunk);
   if (teleport) {
     camera.position.set(teleport.x, teleport.y ?? 1.6, teleport.z);
     if (teleport.yaw !== undefined) {
@@ -222,20 +309,21 @@ function enterChunk(chunk, teleport, roster) {
   }
   net.send("move", { x: camera.position.x, y: camera.position.y, z: camera.position.z });
 
-  // Закрываем чат при переходе между комнатами
   if (chatOpen) closeChat();
+  chatBox.style.display = "none";
 
-  // Кто уже стоял в комнате до нас — player_joined присылается только за
-  // события ПОСЛЕ нашего входа, без ростера мы бы их никогда не увидели.
   for (const p of roster || []) {
     if (p.playerId === myId) continue;
-    spawnPlayerMesh(p.playerId, p.x, p.y, p.z);
+    spawnPlayerMesh(p.playerId, p.name, p.x, p.y, p.z);
   }
+  updateHud();
+  await roomCleanup;
+  if (version !== roomVersion) return;
+  renderer.renderLists.dispose();
+  currentRoomBuilt = buildRoom(scene, chunk);
   updateHud();
 }
 
-// A second client at the identical spawn would be inside the first avatar.
-// Pick a nearby free position and face the other player for a clear local demo.
 function separateSpawn(position, room, roster = []) {
   const occupied = (x, z) => (roster || []).some((p) => Math.hypot(p.x - x, p.z - z) < 2);
   if (!occupied(position.x, position.z)) return position;
@@ -265,7 +353,7 @@ net.on("chunk_data", (msg) => {
 
 net.on("player_joined", (msg) => {
   if (msg.playerId === myId) return;
-  spawnPlayerMesh(msg.playerId, msg.x, msg.y, msg.z);
+  spawnPlayerMesh(msg.playerId, msg.name, msg.x, msg.y, msg.z);
   updateHud();
 });
 
@@ -291,7 +379,6 @@ net.on("error", (msg) => {
   pendingRoomId = null;
   fromRoomForTransition = null;
   console.warn("server error:", msg.code, msg.message);
-  // Если ждали ответ NPC — снимаем "думает"
   if (chatWaiting) {
     removeThinking();
     chatWaiting = false;
@@ -301,7 +388,6 @@ net.on("error", (msg) => {
 // --- движение: WASD + мышь (pointer lock) ---
 const keys = {};
 window.addEventListener("keydown", (e) => {
-  // Не перехватываем клавиши, если чат открыт и фокус на поле ввода
   if (chatOpen && document.activeElement === npcDialogInput) return;
   keys[e.code] = true;
 });
@@ -310,7 +396,7 @@ window.addEventListener("keyup", (e) => {
 });
 
 renderer.domElement.addEventListener("click", () => {
-  if (!chatOpen) renderer.domElement.requestPointerLock();
+  if (!chatOpen && running && !paused) renderer.domElement.requestPointerLock();
 });
 
 let yaw = 0;
@@ -338,7 +424,6 @@ function findNearestNpc() {
 
 // Нажатие E — открыть диалог с ближайшим NPC
 window.addEventListener("keydown", (e) => {
-  // Не реагируем на E, если чат уже открыт (чтобы можно было набирать букву "е")
   if (chatOpen) return;
   if (e.code !== "KeyE") return;
 
@@ -350,19 +435,6 @@ window.addEventListener("keydown", (e) => {
   }
 });
 
-// Escape — закрыть диалог
-window.addEventListener("keydown", (e) => {
-  if (e.code === "Escape" && chatOpen) {
-    e.preventDefault();
-    closeChat();
-  }
-});
-
-// Стены комнаты блокируют камеру, КРОМЕ узкого "проёма" в направлении
-// каждого соседнего отсека (room.connectsTo с сервера). Процедурные комнаты
-// (все, кроме хаба) теперь рисуются круглыми с реальной вырезанной аркой
-// в стене — см. buildProceduralRoom в world.js, использует те же формулы
-// радиуса/ширины прохода, значения должны совпадать с этим файлом.
 const WALL_MARGIN = 0.6; // не даём камере влезть прямо в меш стены
 const DOOR_HALF_WIDTH = 3; // ширина прохода к соседней комнате
 
@@ -370,7 +442,6 @@ function roomRadius(room) {
   return room.radius || Math.min(room.size.w, room.size.d) / 2;
 }
 
-// Authored station rooms supply a circular radius; legacy models use a box.
 function isBoxRoom(room) {
   return Boolean(room.model) && !room.radius;
 }
@@ -402,15 +473,16 @@ function isInDoorway(room, neighbors, x, z) {
 
     const relX = x - room.position.x;
     const relZ = z - room.position.z;
-    const along = relX * dirX + relZ * dirZ; // насколько мы в стороне соседа
-    const lateral = relX * perpX + relZ * perpZ; // насколько в стороне от прямой к нему
+    const along = relX * dirX + relZ * dirZ;
+    const lateral = relX * perpX + relZ * perpZ;
 
     if (along > 0 && Math.abs(lateral) < DOOR_HALF_WIDTH) return true;
   }
   return false;
 }
 
-function isAtDoor(room, door, x, z) {
+function isAtDoor(room, door, x, z, y = camera.position.y) {
+  if (Math.abs(y - (room.position.y + door.position.y + 1.6)) > 0.6) return false;
   const { x: dx, z: dz } = door.position;
   const length = Math.hypot(dx, dz) || 1;
   const relX = x - room.position.x;
@@ -420,8 +492,6 @@ function isAtDoor(room, door, x, z) {
   return along >= length - 1.5 && along <= length + 1 && Math.abs(lateral) < door.halfWidth;
 }
 
-// Возвращает (x, z), в которые реально можно встать: как есть, если игрок
-// внутри комнаты или в проёме к соседу, иначе — прижатые к ближайшей стене.
 function resolveCollision(room, neighbors, x, z) {
   if (isInsideRoom(room, x, z)) return { x, z };
   if (isInDoorway(room, neighbors, x, z)) return { x, z };
@@ -443,10 +513,6 @@ function resolveCollision(room, neighbors, x, z) {
   return { x: room.position.x + (relX / dist) * r, z: room.position.z + (relZ / dist) * r };
 }
 
-// Где встанет игрок, когда появляется в newRoom, придя из fromRoom — чуть
-// внутри стены со стороны, откуда он шёл, лицом вглубь новой комнаты.
-// Без этого игрок возникал бы в центре комнаты, что при повторном входе
-// телепортирует его мимо места, где он реально стоял.
 function computeEntryPoint(newRoom, fromRoom) {
   if (!fromRoom) return null;
   const door = newRoom.doors?.find((entry) => entry.room === fromRoom.id);
@@ -456,7 +522,7 @@ function computeEntryPoint(newRoom, fromRoom) {
     const inset = 1.4;
     return {
       x: newRoom.position.x + x - (x / length) * inset,
-      y: newRoom.position.y + 1.6,
+      y: newRoom.position.y + door.position.y + 1.6,
       z: newRoom.position.z + z - (z / length) * inset,
       yaw: Math.atan2(x, z),
     };
@@ -485,11 +551,8 @@ function computeEntryPoint(newRoom, fromRoom) {
 let pendingRoomId = null;
 let fromRoomForTransition = null;
 
-// Переход срабатывает в момент пересечения проёма (а не когда игрок дойдёт
-// до центра соседней комнаты) — раньше между "прошёл через проём" и
-// "комната реально сменилась" была добрая пара секунд ходьбы в пустоте.
 function maybeAutoEnterNeighbor() {
-  if (!currentRoomBuilt || pendingRoomId) return;
+  if (!currentRoomBuilt?.ready || pendingRoomId || disconnected) return;
   const { room, neighbors } = currentRoomBuilt;
   if (room.doors) {
     const door = room.doors.find((entry) => {
@@ -520,60 +583,184 @@ const clock = new THREE.Clock();
 let lastSentAt = 0;
 
 function tick() {
-  const dt = clock.getDelta();
-  camera.rotation.y = yaw;
-  camera.rotation.x = pitch;
+  if (!running) return;
 
-  // Не двигаемся, если открыт чат
-  if (!chatOpen) {
-    const forward = new THREE.Vector3(-Math.sin(yaw), 0, -Math.cos(yaw));
-    const right = new THREE.Vector3(-forward.z, 0, forward.x);
-    const move = new THREE.Vector3();
-    if (keys["KeyW"]) move.add(forward);
-    if (keys["KeyS"]) move.sub(forward);
-    if (keys["KeyD"]) move.add(right);
-    if (keys["KeyA"]) move.sub(right);
-    if (move.lengthSq() > 0) {
-      move.normalize().multiplyScalar(speed * dt);
-      camera.position.add(move);
+  const dt = Math.min(clock.getDelta(), 0.05);
+
+  if (!paused) {
+    camera.rotation.y = yaw;
+    camera.rotation.x = pitch;
+
+    if (!chatOpen) {
+      const forward = new THREE.Vector3(-Math.sin(yaw), 0, -Math.cos(yaw));
+      const right = new THREE.Vector3(-forward.z, 0, forward.x);
+      const move = new THREE.Vector3();
+      if (keys["KeyW"]) move.add(forward);
+      if (keys["KeyS"]) move.sub(forward);
+      if (keys["KeyD"]) move.add(right);
+      if (keys["KeyA"]) move.sub(right);
+      if (move.lengthSq() > 0) {
+        move.normalize().multiplyScalar(speed * dt);
+      }
+
+      if (currentRoomBuilt?.ready && !pendingRoomId && !disconnected) {
+        if (currentRoomBuilt.collision) currentRoomBuilt.collision.move(camera.position, move);
+        else camera.position.add(move);
+        const resolved = resolveCollision(currentRoomBuilt.room, currentRoomBuilt.neighbors, camera.position.x, camera.position.z);
+        camera.position.x = resolved.x;
+        camera.position.z = resolved.z;
+        maybeAutoEnterNeighbor();
+      }
+    }
+
+    if (!chatOpen) {
+      const near = findNearestNpc();
+      npcHint.style.display = near ? "block" : "none";
+    }
+
+    updateHud();
+
+    const now = performance.now();
+    if (now - lastSentAt > 50) {
+      lastSentAt = now;
+      net.send("move", { x: camera.position.x, y: camera.position.y, z: camera.position.z });
     }
   }
 
-  if (currentRoomBuilt) {
-    const resolved = resolveCollision(currentRoomBuilt.room, currentRoomBuilt.neighbors, camera.position.x, camera.position.z);
-    camera.position.x = resolved.x;
-    camera.position.z = resolved.z;
-    if (!chatOpen) maybeAutoEnterNeighbor();
-  }
-
-  // Подсказка [E] Поговорить — показывается, когда рядом NPC и чат закрыт
-  if (!chatOpen) {
-    const near = findNearestNpc();
-    npcHint.style.display = near ? "block" : "none";
-  }
-
-  const now = performance.now();
-  if (now - lastSentAt > 50) {
-    lastSentAt = now;
-    net.send("move", { x: camera.position.x, y: camera.position.y, z: camera.position.z });
-  }
-
-  renderer.render(scene, camera);
+  cosmicSky.render(renderer, scene, camera);
   requestAnimationFrame(tick);
 }
 
+function startGame() {
+  loginEl.style.display = "none";
+  pauseEl.hidden = true;
+  paused = false;
+  if (!running) {
+    running = true;
+    tick();
+  }
+}
+
+function stopGame() {
+  running = false;
+  paused = false;
+  net.disconnect();
+  if (document.pointerLockElement) document.exitPointerLock();
+
+  ++roomVersion;
+  roomCleanup = roomCleanup.then(() => destroyRoom(scene, currentRoomBuilt));
+  currentRoomBuilt = null;
+  for (const id of [...players.keys()]) removePlayerMesh(id);
+  myId = null;
+  myName = null;
+  disconnected = false;
+  if (chatOpen) closeChat();
+  chatBox.style.display = "none";
+
+  clearSession();
+  pauseEl.hidden = true;
+  loginEl.style.display = "flex";
+  loginError.textContent = "";
+  loginSubmit.disabled = false;
+}
+
 const loginEl = document.getElementById("login");
+paintLoginStarfield(loginEl);
+
 const loginForm = document.getElementById("login-form");
+const loginError = document.getElementById("login-error");
+const loginSubmit = document.getElementById("login-submit");
+const loginPasswordHint = document.getElementById("login-password-hint");
+const tabs = document.querySelectorAll("#login .tab");
+
+let authMode = "login"; // "login" | "register"
+const submitLabel = { login: "Войти на станцию", register: "Зарегистрироваться" };
+
+for (const tab of tabs) {
+  tab.addEventListener("click", () => {
+    authMode = tab.dataset.mode;
+    for (const t of tabs) t.classList.toggle("active", t === tab);
+    loginSubmit.textContent = submitLabel[authMode];
+    loginPasswordHint.hidden = authMode !== "register";
+    loginError.textContent = "";
+  });
+}
+
+const PASSWORD_POLICY_MESSAGE = "Пароль должен быть не короче 8 символов и содержать цифру, строчную и заглавную букву";
+function passwordPolicyError(password) {
+  if (password.length < 8) return PASSWORD_POLICY_MESSAGE;
+  if (!/[0-9]/.test(password) || !/[a-zа-яё]/i.test(password) || !/[A-ZА-ЯЁ]/.test(password)) {
+    return PASSWORD_POLICY_MESSAGE;
+  }
+  return null;
+}
+
 loginForm.addEventListener("submit", async (e) => {
   e.preventDefault();
   const name = document.getElementById("login-name").value.trim();
-  if (!name) return;
+  const password = document.getElementById("login-password").value;
+  loginError.textContent = "";
+  if (!name || !password) {
+    loginError.textContent = "Введи имя и пароль";
+    return;
+  }
+
+  if (authMode === "register") {
+    const policyError = passwordPolicyError(password);
+    if (policyError) {
+      loginError.textContent = policyError;
+      return;
+    }
+  }
+
+  loginSubmit.disabled = true;
   try {
-    const { token } = await net.login(name);
+    const { token } = authMode === "register" ? await net.register(name, password) : await net.login(name, password);
     await net.connect(token);
-    loginEl.style.display = "none";
-    tick();
+    saveSession(token, name);
+    startGame();
   } catch (err) {
-    alert("Не удалось подключиться к серверу: " + err.message);
+    loginError.textContent = err.message;
+  } finally {
+    loginSubmit.disabled = false;
   }
 });
+
+// --- Пауза (Esc во время игры) и выход ---
+const pauseEl = document.getElementById("pause");
+document.getElementById("pause-resume").addEventListener("click", () => {
+  paused = false;
+  pauseEl.hidden = true;
+  renderer.domElement.requestPointerLock();
+});
+document.getElementById("pause-exit").addEventListener("click", stopGame);
+
+window.addEventListener("keydown", (e) => {
+  if (e.code !== "Escape" || !running) return;
+  // Если открыт чат — Esc просто закрывает чат, а не ставит на паузу
+  if (chatOpen) {
+    e.preventDefault();
+    closeChat();
+    return;
+  }
+  paused = !paused;
+  pauseEl.hidden = !paused;
+  if (!paused) renderer.domElement.requestPointerLock();
+  else if (document.pointerLockElement) document.exitPointerLock();
+});
+
+(async function tryAutoLogin() {
+  const session = loadSession();
+  if (!session?.token) return;
+  loginSubmit.disabled = true;
+  loginError.textContent = `Подключаемся как ${session.name}…`;
+  try {
+    await net.connect(session.token);
+    startGame();
+  } catch {
+    clearSession();
+    loginError.textContent = "";
+  } finally {
+    loginSubmit.disabled = false;
+  }
+})();
