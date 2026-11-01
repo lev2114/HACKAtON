@@ -38,12 +38,15 @@ type roomState struct {
 	Revision uint64       `json:"revision"`
 	Doors    []doorPose   `json:"doors"`
 	Roombas  []roombaPose `json:"roombas"`
+	NPCs     []npcPose    `json:"npcs"`
 }
 type facilityState struct {
-	mu       sync.Mutex
-	revision uint64
-	doors    map[string]*doorState
-	cleaners map[string][]*cleaner
+	mu            sync.Mutex
+	revision      uint64
+	doors         map[string]*doorState
+	cleaners      map[string][]*cleaner
+	npcs          map[string][]*wanderingNPC
+	conversations map[string]npcConversation
 }
 
 func doorKey(a, b string) string {
@@ -53,7 +56,7 @@ func doorKey(a, b string) string {
 	return a + ":" + b
 }
 func newFacility(w *world.World) *facilityState {
-	f := &facilityState{doors: map[string]*doorState{}, cleaners: map[string][]*cleaner{}}
+	f := &facilityState{doors: map[string]*doorState{}, cleaners: map[string][]*cleaner{}, npcs: map[string][]*wanderingNPC{}, conversations: map[string]npcConversation{}}
 	for id, room := range w.Rooms {
 		for _, d := range room.Doors {
 			f.doors[doorKey(id, d.Room)] = &doorState{}
@@ -83,17 +86,23 @@ func newFacility(w *world.World) *facilityState {
 			}
 		}
 	}
+	for _, npc := range w.NPCs {
+		f.npcs[npc.RoomID] = append(f.npcs[npc.RoomID], newWanderingNPC(npc, w.NPCNavigation[npc.RoomID]))
+	}
 	return f
 }
 
 // Call with facility.mu held; all returned actor data are value copies.
 func (s *Server) facilitySnapshot(room string) roomState {
-	state := roomState{Room: room, Revision: s.facility.revision, Doors: []doorPose{}, Roombas: []roombaPose{}}
+	state := roomState{Room: room, Revision: s.facility.revision, Doors: []doorPose{}, Roombas: []roombaPose{}, NPCs: []npcPose{}}
 	for _, d := range s.World.Rooms[room].Doors {
 		state.Doors = append(state.Doors, doorPose{d.Room, s.facility.doors[doorKey(room, d.Room)].Open})
 	}
 	for _, r := range s.facility.cleaners[room] {
 		state.Roombas = append(state.Roombas, r.roombaPose)
+	}
+	for _, npc := range s.facility.npcs[room] {
+		state.NPCs = append(state.NPCs, npc.npcPose)
 	}
 	return state
 }
@@ -194,6 +203,7 @@ func (s *Server) RunFacility(ctx context.Context) {
 			return
 		case <-ticker.C:
 			s.facility.mu.Lock()
+			s.stepNPCs(time.Now())
 			for roomID, robots := range s.facility.cleaners {
 				nav := s.World.Navigation[roomID]
 				players := s.Hub.PlayersInRoom(roomID, "")
@@ -246,6 +256,11 @@ func (s *Server) RunFacility(ctx context.Context) {
 					}
 					for _, player := range players {
 						if math.Abs(player.Y-r.Y-1.6) < 0.5 && math.Hypot(player.X-x, player.Z-z) < 0.65 {
+							blocked = true
+						}
+					}
+					for _, npc := range s.facility.npcs[roomID] {
+						if math.Hypot(npc.X-x, npc.Z-z) < 0.8 {
 							blocked = true
 						}
 					}

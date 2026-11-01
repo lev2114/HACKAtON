@@ -15,6 +15,7 @@ import (
 	"net"
 	"net/http"
 	"strings"
+	"sync/atomic"
 	"time"
 	"unicode"
 
@@ -291,11 +292,19 @@ func (s *Server) WS(w http.ResponseWriter, r *http.Request) {
 	}
 	s.Hub.UpdatePosition(player.ID, player.Room, player.X, player.Y, player.Z)
 	go client.WritePump()
+	ctx, cancel := context.WithCancel(r.Context())
+	defer cancel()
+	var replyBusy atomic.Bool
 
 	defer func() {
+		cancel()
 		room := s.Hub.RoomOf(player.ID) // перед Unregister — потом хаб его уже не помнит
+		if _, valid := s.World.Rooms[room]; !valid {
+			room = player.Room
+		}
 		s.Hub.Unregister(player.ID)
 		s.facility.mu.Lock()
+		delete(s.facility.conversations, player.ID)
 		s.closeRoomDoors(room)
 		s.facility.mu.Unlock()
 		client.Close()
@@ -332,23 +341,25 @@ func (s *Server) WS(w http.ResponseWriter, r *http.Request) {
 		if err != nil {
 			return
 		}
-		s.handleMessage(client, player, data)
+		s.handleMessage(ctx, &replyBusy, client, player, data)
 	}
 }
 
 type incoming struct {
-	Door    string  `json:"door"`
-	Open    bool    `json:"open"`
-	Type    string  `json:"type"`
-	Room    string  `json:"room"`
-	X       float64 `json:"x"`
-	Y       float64 `json:"y"`
-	Z       float64 `json:"z"`
-	NpcID   string  `json:"npcId"`
-	Message string  `json:"message"`
+	Active    bool    `json:"active"`
+	RequestID uint64  `json:"requestId"`
+	Door      string  `json:"door"`
+	Open      bool    `json:"open"`
+	Type      string  `json:"type"`
+	Room      string  `json:"room"`
+	X         float64 `json:"x"`
+	Y         float64 `json:"y"`
+	Z         float64 `json:"z"`
+	NpcID     string  `json:"npcId"`
+	Message   string  `json:"message"`
 }
 
-func (s *Server) handleMessage(client *hub.Client, player *store.Player, raw []byte) {
+func (s *Server) handleMessage(ctx context.Context, replyBusy *atomic.Bool, client *hub.Client, player *store.Player, raw []byte) {
 	var msg incoming
 	if err := json.Unmarshal(raw, &msg); err != nil {
 		log.Printf("ws: bad message from %s: %v", player.ID, err)
@@ -356,6 +367,8 @@ func (s *Server) handleMessage(client *hub.Client, player *store.Player, raw []b
 	}
 
 	switch msg.Type {
+	case "npc_conversation":
+		s.onNpcConversation(client, player, msg)
 	case "door_set":
 		s.onDoorSet(client, player, msg)
 	case "move":
@@ -363,7 +376,19 @@ func (s *Server) handleMessage(client *hub.Client, player *store.Player, raw []b
 	case "chunk_request":
 		s.onChunkRequest(client, player, msg)
 	case "npc_talk":
-		s.onNpcTalk(client, player, msg)
+		if !s.canTalkToNPC(player, msg.NpcID) {
+			client.Send(map[string]any{"type": "error", "code": "npc_out_of_reach", "message": "Подойди ближе и начни разговор заново", "requestId": msg.RequestID})
+			return
+		}
+		if !replyBusy.CompareAndSwap(false, true) {
+			client.Send(map[string]any{"type": "error", "code": "npc_busy", "message": "Дождись предыдущего ответа и отправь вопрос ещё раз", "requestId": msg.RequestID})
+			return
+		}
+		playerCopy := *player // Read loop can keep updating player while AI runs.
+		go func() {
+			defer replyBusy.Store(false)
+			s.onNpcTalk(ctx, client, &playerCopy, msg)
+		}()
 	default:
 		log.Printf("ws: unknown message type %q from %s", msg.Type, player.ID)
 	}
@@ -422,6 +447,7 @@ func (s *Server) onChunkRequest(client *hub.Client, player *store.Player, msg in
 		break
 	}
 	player.Room = msg.Room
+	delete(s.facility.conversations, player.ID)
 	s.Hub.UpdatePosition(player.ID, msg.Room, player.X, player.Y, player.Z)
 	s.closeRoomDoors(oldRoom)
 	if err := s.Store.SavePosition(player.ID, msg.Room, player.X, player.Y, player.Z); err != nil {
@@ -441,10 +467,10 @@ func (s *Server) onChunkRequest(client *hub.Client, player *store.Player, msg in
 	})
 }
 
-func (s *Server) onNpcTalk(client *hub.Client, player *store.Player, msg incoming) {
+func (s *Server) onNpcTalk(ctx context.Context, client *hub.Client, player *store.Player, msg incoming) {
 	npc, ok := s.World.NPCs[msg.NpcID]
 	if !ok {
-		client.Send(map[string]any{"type": "error", "code": "unknown_npc", "message": "нет такого NPC: " + msg.NpcID})
+		s.Hub.SendToClient(client, map[string]any{"type": "error", "code": "unknown_npc", "message": "нет такого NPC: " + msg.NpcID, "requestId": msg.RequestID})
 		return
 	}
 
@@ -457,7 +483,10 @@ func (s *Server) onNpcTalk(client *hub.Client, player *store.Player, msg incomin
 	// Use keyword-aware PickFact instead of simple NextUntoldFact
 	fact, isRepeat, availableTopics := s.World.PickFact(npc.ID, msg.Message, told)
 
-	text := s.AI.Reply(context.Background(), npc, fact, msg.Message, isRepeat, availableTopics, player.ID)
+	text := s.AI.Reply(ctx, npc, fact, msg.Message, isRepeat, availableTopics, player.ID)
+	if ctx.Err() != nil {
+		return
+	}
 
 	if fact != nil && !isRepeat {
 		if err := s.Store.MarkToldFact(player.ID, npc.ID, fact.ID); err != nil {
@@ -465,7 +494,7 @@ func (s *Server) onNpcTalk(client *hub.Client, player *store.Player, msg incomin
 		}
 	}
 
-	client.Send(map[string]any{
-		"type": "npc_response", "npcId": npc.ID, "npcName": npc.Name, "text": text,
+	s.Hub.SendToClient(client, map[string]any{
+		"type": "npc_response", "npcId": npc.ID, "npcName": npc.Name, "text": text, "requestId": msg.RequestID,
 	})
 }

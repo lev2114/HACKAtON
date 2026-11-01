@@ -101,12 +101,14 @@
 |-----------------|-----------------------------------|--------------------------------------------------------------------|
 | `move`          | `x, y, z` (float)                 | обновляет позицию игрока, транслируется остальным в той же комнате |
 | `chunk_request` | `room` (string, id комнаты)       | игрок переходит в другую комнату, запрашивает её данные            |
-| `npc_talk`      | `npcId` (string), `message` (string) | игрок обращается к NPC                                          |
+| `npc_talk`      | `npcId` (string), `message` (string), `requestId` (number) | игрок обращается к NPC в открытом чате |
+| `npc_conversation` | `npcId` (string), `active` (boolean) | начать/поддержать или завершить разговор |
 
 ```json
 { "type": "move", "x": 1.2, "y": 1.6, "z": -4.0 }
 { "type": "chunk_request", "room": "room_stars" }
-{ "type": "npc_talk", "npcId": "losyash", "message": "расскажи про чёрные дыры" }
+{ "type": "npc_conversation", "npcId": "losyash", "active": true }
+{ "type": "npc_talk", "npcId": "losyash", "message": "расскажи про чёрные дыры", "requestId": 1 }
 ```
 
 ### Сервер → Клиент
@@ -118,7 +120,7 @@
 | `player_joined`  | `playerId, name, x, y, z`                              | кто-то зашёл в комнату, где ты сейчас находишься |
 | `player_moved`   | `playerId, x, y, z`                                    | кто-то в твоей комнате сдвинулся                 |
 | `player_left`    | `playerId`                                              | кто-то вышел из твоей комнаты (или отключился)   |
-| `npc_response`   | `npcId, npcName, text`                                  | ответ NPC на `npc_talk`                          |
+| `npc_response`   | `npcId, npcName, text, requestId`                       | ответ NPC на `npc_talk`                          |
 | `error`          | `code, message`                                         | невалидный запрос (неизвестная комната/NPC)      |
 
 `players` — массив `{playerId, name, x, y, z}`, те, кто **уже стоит** в
@@ -222,8 +224,8 @@ Room id сохранены. В каждой комнате один NPC; пов�
 
 [BREAKING] Updated client and server must be deployed together.
 Client -> server: door_set {room: current room ID, door: destination room ID, open: boolean}.
-Server -> client: room_state {state:{room, revision, doors:[{room,open}], roombas:[{id,x,y,z,heading}]}}.
-welcome and chunk_data include state:{room,revision,doors,roombas}.
+Server -> client: room_state {state:{room, revision, doors:[{room,open}], roombas:[{id,x,y,z,heading}], npcs:[{id,x,y,z,heading,talkingTo}]}}.
+welcome and chunk_data include state:{room,revision,doors,roombas,npcs}.
 Only current-room actors are sent. Revisions increase monotonically within a server run;
 clients ignore stale snapshots and retain only the snapshot for the room being entered.
 Doors are shared by the two connected rooms. Server validates proximity and rejects
@@ -234,3 +236,34 @@ Roombas are simulated at 10 Hz by the server on world-data/roomba-nav.json, prep
 offline from GLB floor/obstacle geometry. Clients interpolate poses, with no local RNG.
 No room geometry/navigation grid is sent to clients. Door and cleaner state is in memory
 and resets on server restart.
+
+### Wandering NPCs and conversations
+
+`room_state`, `welcome.state` and `chunk_data.state` also contain
+`npcs:[{id,x,y,z,heading,talkingTo}]`. Coordinates are the NPC holder/body
+anchor (feet + 1 m); heading 0 faces world +Z, increasing toward +X.
+NPC movement, random pauses and conversation facing are server-owned at 10 Hz.
+Only the current room's poses are sent; the NPC navigation graph stays on Go.
+
+Client -> server: `npc_conversation {npcId,active:boolean}`. Send active=true
+when opening chat and every 5 seconds while open, active=false when closing.
+The server checks room, floor and distance (3.4 m), releases sessions on room
+change/disconnect/timeout (15 s), and keeps an NPC still while any valid
+conversation is active. If multiple players talk to one NPC, it faces its
+current interlocutor until that conversation ends, then another active player.
+`talkingTo` is that player's ID, or an empty string while wandering.
+`npc_talk` requires the same room/proximity and an active conversation.
+AI replies run separately from the socket read loop (one pending request per
+connection), allowing chat closure/heartbeats/movement during generation.
+Response delivery is restricted to the originating live connection.
+`npc_talk` includes a numeric `requestId`, echoed in `npc_response` and
+request errors; the client ignores replies from a closed/replaced chat.
+Restart Go and refresh all clients together for NPC movement support.
+
+## Восстановление входа и повторные сессии
+
+Невалидная сохранённая room восстанавливается сервером в hub до welcome.
+Для одного playerId допускается одна активная WS-сессия; новая получает
+error {code:"session_in_use",message} и закрывается. Клиент ждёт welcome с
+непустой chunk.room перед входом в игру; ошибки до welcome показываются на
+форме входа, таймаут ожидания — 15 секунд.

@@ -6,6 +6,8 @@ import { GLTFLoader } from "three/addons/loaders/GLTFLoader.js";
 import { createRoomCollision } from "./collision.js";
 import { createDoors } from "./doors.js";
 import { createRoombas } from "./roombas.js";
+import { createNpcAnimation } from "./npc-animation.js";
+import { createNpcMotion } from "./npc-motion.js";
 
 const loader = new GLTFLoader();
 async function loadModel(url, built) {
@@ -57,7 +59,7 @@ export function buildRoom(scene, chunk) {
   const built = {
     group, npcMeshes: {}, room, neighbors: chunk.neighbors || [],
     controller: new AbortController(), loads: [], disposed: false,
-    ready: !room.model, error: null, collision: null, roombas: null,
+    ready: !room.model, error: null, collision: null, roombas: null, npcAnimations: new Map(),
   };
 
   // room.position — это абсолютные мировые координаты (как и у NPC ниже),
@@ -74,6 +76,7 @@ export function buildRoom(scene, chunk) {
   for (const npc of npcs || []) {
     built.npcMeshes[npc.id] = buildNpcEntity(built, npc);
   }
+  built.npcMotion = createNpcMotion(room, built.npcMeshes, built.npcAnimations);
 
   addDoorwayLight(group, room, chunk.neighbors);
   built.doors = createDoors(group, room, built.neighbors);
@@ -81,6 +84,7 @@ export function buildRoom(scene, chunk) {
     built.sharedState = state;
     built.doors.applyState(state, instant);
     built.roombas?.applyState(state);
+    built.npcMotion.applyState(state, instant);
   };
 
   scene.add(group);
@@ -109,12 +113,13 @@ function buildNpcEntity(built, npc) {
   if (npc.model) {
     built.loads.push(loadModel(npc.model, built)
       .then((instance) => {
-        fitNpcModel(instance, npc);
+        const animation = createNpcAnimation(instance, npc);
 
         holder.remove(placeholder);
         placeholder.geometry.dispose();
         placeholder.material.dispose();
-        holder.add(instance);
+        holder.add(animation.model);
+        built.npcAnimations.set(npc.id, animation);
       })
       .catch((err) => {
         if (err.name !== "AbortError") console.error(`не удалось загрузить модель NPC ${npc.id}:`, err);
@@ -122,21 +127,6 @@ function buildNpcEntity(built, npc) {
   }
 
   return holder;
-}
-
-// Ставит модель персонажа на пол (мировой y=0, как и у всех комнат) и
-// масштабирует под разумный рост — модели приходят в произвольном
-// исходном масштабе, как и модели комнат (см. fitModelToRoom).
-const NPC_TARGET_HEIGHT = 1.7;
-
-function fitNpcModel(root, npc) {
-  const box = new THREE.Box3().setFromObject(root);
-  const size = box.getSize(new THREE.Vector3());
-  const center = box.getCenter(new THREE.Vector3());
-
-  const scale = NPC_TARGET_HEIGHT / (size.y || 1);
-  root.scale.setScalar(scale);
-  root.position.set(-center.x * scale, -1 - box.min.y * scale, -center.z * scale);
 }
 
 // Ширина проёма — должна совпадать с DOOR_HALF_WIDTH в main.js (там же
@@ -326,6 +316,8 @@ export async function destroyRoom(scene, built) {
   built.collision = null;
   built.doors = null;
   built.roombas = null;
+  built.npcAnimations.clear();
+  built.npcMotion.clear();
   disposeOwnedResources(built.group);
   built.group.clear();
   built.npcMeshes = {};
@@ -334,15 +326,16 @@ export async function destroyRoom(scene, built) {
 }
 
 function disposeOwnedResources(obj) {
-  const geometries = new Set(), materials = new Set(), textures = new Set(), images = new Set();
+  const geometries = new Set(), materials = new Set(), textures = new Set(), images = new Set(), skeletons = new Set();
   obj.traverse((node) => {
     if (node.geometry) geometries.add(node.geometry);
-    if (node.skeleton) node.skeleton.dispose();
+    if (node.skeleton) skeletons.add(node.skeleton);
     for (const material of node.material ? (Array.isArray(node.material) ? node.material : [node.material]) : []) {
       materials.add(material);
       for (const value of Object.values(material)) if (value?.isTexture) textures.add(value);
     }
   });
+  for (const skeleton of skeletons) skeleton.dispose();
   for (const texture of textures) {
     if (texture.source?.data) images.add(texture.source.data);
     texture.dispose();

@@ -100,6 +100,16 @@ func (h *Hub) Unregister(playerID string) {
 	h.mu.Unlock()
 }
 
+// Background NPC replies may finish after logout. Keep connection identity
+// checking and delivery under the same lock as Unregister/Close ordering.
+func (h *Hub) SendToClient(client *Client, message any) {
+	h.mu.RLock()
+	defer h.mu.RUnlock()
+	if h.clients[client.PlayerID] == client {
+		client.Send(message)
+	}
+}
+
 // RoomOf returns the room a player is currently in, or "" if they're not
 // connected (e.g. already disconnected — call this BEFORE Unregister if you
 // need the room they were just in).

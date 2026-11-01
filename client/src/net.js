@@ -24,6 +24,10 @@ export class Net {
     this.send("door_set", { room, door, open });
   }
 
+  setNpcConversation(npcId, active) {
+    this.send("npc_conversation", { npcId, active });
+  }
+
   async register(name, password) {
     return this.#auth("register", name, password);
   }

@@ -78,10 +78,11 @@ type Fact struct {
 // at a time and individual Facts one at a time (via PickFact), never
 // the full Facts map.
 type World struct {
-	Rooms      map[string]Room
-	NPCs       map[string]NPC
-	Facts      map[string][]Fact // keyed by NPC factBank id
-	Navigation map[string]RoombaNavigation
+	Rooms         map[string]Room
+	NPCs          map[string]NPC
+	Facts         map[string][]Fact // keyed by NPC factBank id
+	Navigation    map[string]RoombaNavigation
+	NPCNavigation map[string]RoombaNavigation
 }
 
 type RoombaNavigation struct {
@@ -104,24 +105,29 @@ func Load(dir string) (*World, error) {
 	if err := loadJSON(filepath.Join(dir, "roomba-nav.json"), &w.Navigation); err != nil {
 		return nil, fmt.Errorf("roomba-nav.json: %w", err)
 	}
-	for id := range w.Rooms {
-		nav, ok := w.Navigation[id]
-		if !ok || len(nav.Points) != len(nav.Links) {
-			return nil, fmt.Errorf("invalid cleaner navigation for %s", id)
-		}
-		usable := 0
-		for _, links := range nav.Links {
-			if len(links) > 0 {
-				usable++
+	if err := loadJSON(filepath.Join(dir, "npc-nav.json"), &w.NPCNavigation); err != nil {
+		return nil, fmt.Errorf("npc-nav.json: %w", err)
+	}
+	for name, graphs := range map[string]map[string]RoombaNavigation{"cleaner": w.Navigation, "NPC": w.NPCNavigation} {
+		for id := range w.Rooms {
+			nav, ok := graphs[id]
+			if !ok || len(nav.Points) != len(nav.Links) {
+				return nil, fmt.Errorf("invalid %s navigation for %s", name, id)
 			}
-			for _, index := range links {
-				if index < 0 || index >= len(nav.Points) {
-					return nil, fmt.Errorf("invalid cleaner route index for %s", id)
+			usable := 0
+			for _, links := range nav.Links {
+				if len(links) > 0 {
+					usable++
+				}
+				for _, index := range links {
+					if index < 0 || index >= len(nav.Points) {
+						return nil, fmt.Errorf("invalid %s route index for %s", name, id)
+					}
 				}
 			}
-		}
-		if usable < 2 {
-			return nil, fmt.Errorf("missing cleaner routes for %s", id)
+			if usable < 2 {
+				return nil, fmt.Errorf("missing %s routes for %s", name, id)
+			}
 		}
 	}
 

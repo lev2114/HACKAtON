@@ -1,5 +1,6 @@
 // Offline asset preparation, not a test. Run from client with:
 // node scripts/build-roomba-navigation.mjs
+// Add --npc to prepare full-height NPC routes instead of cleaner routes.
 import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -11,6 +12,7 @@ const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../..")
 const rooms = JSON.parse(fs.readFileSync(path.join(root, "world-data/rooms.json")));
 const npcs = JSON.parse(fs.readFileSync(path.join(root, "world-data/npcs.json")));
 const loader = new GLTFLoader();
+const forNpc = process.argv.includes("--npc");
 async function geometryOnly(url) {
   const source = fs.readFileSync(path.join(root, "client/public", url));
   const jsonLength = source.readUInt32LE(12);
@@ -29,15 +31,18 @@ async function geometryOnly(url) {
   padded.copy(result, 20); binary.copy(result, 20 + padded.length);
   return (await loader.parseAsync(result.buffer.slice(result.byteOffset, result.byteOffset + result.length), "")).scene;
 }
-const roomba = await geometryOnly("models/roomba.glb");
-const size = new THREE.Box3().setFromObject(roomba).getSize(new THREE.Vector3());
-const height = Math.max(0.1, size.y * 0.48 / Math.max(size.x, size.z));
+let height = 1.7;
+if (!forNpc) {
+  const roomba = await geometryOnly("models/roomba.glb");
+  const size = new THREE.Box3().setFromObject(roomba).getSize(new THREE.Vector3());
+  height = Math.max(0.1, size.y * 0.48 / Math.max(size.x, size.z));
+}
 const navigation = {};
 for (const room of Object.values(rooms)) {
   const model = await geometryOnly(room.model);
   model.position.set(room.position.x, room.position.y, room.position.z);
   model.scale.setScalar(room.modelScale || 1);
-  const holders = Object.fromEntries(Object.values(npcs).filter(n => n.roomId === room.id)
+  const holders = forNpc ? {} : Object.fromEntries(Object.values(npcs).filter(n => n.roomId === room.id)
     .map(n => [n.id, { position: new THREE.Vector3(n.position.x, n.position.y, n.position.z) }]));
   const collision = createRoomCollision(model, holders);
   const radius = (room.radius || Math.min(room.size.w, room.size.d) / 2) - 0.8;
@@ -50,7 +55,7 @@ for (const room of Object.values(rooms)) {
       if ((dx * door.position.x + dz * door.position.z) / length > length - 1.4 &&
           Math.abs((-dx * door.position.z + dz * door.position.x) / length) < door.halfWidth + 0.7) return null;
     }
-    return collision.cleanerFloor(x, z, room.position.y + 0.055, 0.27, height);
+    return collision.cleanerFloor(x, z, room.position.y + 0.055, forNpc ? 0.55 : 0.27, height);
   }
   const extent = Math.floor(radius / 0.5);
   for (let ix = -extent; ix <= extent; ix++) for (let iz = -extent; iz <= extent; iz++) {
@@ -64,7 +69,9 @@ for (const room of Object.values(rooms)) {
   const links = points.map((point, i) => {
     const [ix, iz] = coordinates[i];
     const neighbors = [];
-    for (const [dx, dz] of [[1, 0], [-1, 0], [0, 1], [0, -1]]) {
+    const directions = [[1, 0], [-1, 0], [0, 1], [0, -1]];
+    if (forNpc) directions.push([1, 1], [1, -1], [-1, 1], [-1, -1]);
+    for (const [dx, dz] of directions) {
       const j = cells.get(`${ix + dx},${iz + dz}`);
       if (j === undefined) continue;
       let clear = true;
@@ -83,4 +90,4 @@ for (const room of Object.values(rooms)) {
   for (const geometry of geometries) geometry.dispose();
   for (const material of materials) material.dispose();
 }
-fs.writeFileSync(path.join(root, "world-data/roomba-nav.json"), JSON.stringify(navigation) + "\n");
+fs.writeFileSync(path.join(root, forNpc ? "world-data/npc-nav.json" : "world-data/roomba-nav.json"), JSON.stringify(navigation) + "\n");

@@ -127,6 +127,12 @@ let chatNpcId = null; // id NPC, с которым говорим
 let chatNpcName = null; // имя NPC
 let chatWaiting = false; // ждём ответ от сервера
 let thinkingEl = null; // элемент "думает..."
+let chatRequestId = 0;
+let lastConversationHeartbeat = 0;
+
+function requestNpcReply(message) {
+  net.send("npc_talk", { npcId: chatNpcId, message, requestId: ++chatRequestId });
+}
 
 function updateHud() {
   hud.textContent = disconnected
@@ -146,6 +152,10 @@ function openChat(npcId, npcName) {
   chatNpcName = npcName;
   chatWaiting = false;
 
+  net.send("move", { x: camera.position.x, y: camera.position.y, z: camera.position.z });
+  net.setNpcConversation(npcId, true);
+  lastConversationHeartbeat = performance.now();
+
   npcDialogHeader.textContent = npcName;
   npcDialogMessages.innerHTML = "";
   npcDialog.style.display = "flex";
@@ -163,13 +173,15 @@ function openChat(npcId, npcName) {
   addMessage("Вы", "Привет!", true);
   chatWaiting = true;
   showThinking();
-  net.send("npc_talk", { npcId: chatNpcId, message: "Привет!" });
+  requestNpcReply("Привет!");
 }
 
 // restoreLock=false во время logout (stopGame) — там мы уходим на экран
 // входа, а не возвращаемся в игру, так что захватывать курсор не нужно.
 function closeChat(restoreLock = true) {
   clearMovementKeys();
+  if (chatNpcId) net.setNpcConversation(chatNpcId, false);
+  chatRequestId++; // Ignore an AI reply from the chat that was just closed.
   chatOpen = false;
   chatNpcId = null;
   chatNpcName = null;
@@ -229,7 +241,7 @@ function sendPlayerMessage() {
 
   chatWaiting = true;
   showThinking();
-  net.send("npc_talk", { npcId: chatNpcId, message: text });
+  requestNpcReply(text);
 }
 
 npcDialogSend.addEventListener("click", sendPlayerMessage);
@@ -401,9 +413,21 @@ net.on("disconnect", () => {
   updateHud();
 });
 
-net.on("npc_response", (msg) => showChat(msg.npcName, msg.text));
+net.on("npc_response", (msg) => {
+  if (msg.npcId === chatNpcId && msg.requestId === chatRequestId) showChat(msg.npcName, msg.text);
+});
 
 net.on("error", (msg) => {
+  if (msg.code === "npc_out_of_reach") {
+    if (msg.requestId !== undefined && msg.requestId !== chatRequestId) return;
+    if (chatOpen) closeChat(false);
+    console.warn(msg.message);
+    return;
+  }
+  if (msg.code === "npc_busy") {
+    if (chatOpen && msg.requestId === chatRequestId) showChat("Станция", msg.message);
+    return;
+  }
   pendingRoomId = null;
   fromRoomForTransition = null;
   console.warn("server error:", msg.code, msg.message);
@@ -644,6 +668,11 @@ function tick() {
   const dt = Math.min(clock.getDelta(), 0.05);
   if (!paused) currentRoomBuilt?.doors.update(dt);
   if (!disconnected) currentRoomBuilt?.roombas?.update(dt);
+  if (!disconnected) currentRoomBuilt?.npcMotion.update(dt);
+  if (!disconnected && chatOpen && performance.now() - lastConversationHeartbeat > 5000) {
+    net.setNpcConversation(chatNpcId, true);
+    lastConversationHeartbeat = performance.now();
+  }
 
   if (!paused && !chatOpen) {
     camera.rotation.y = yaw;
@@ -708,6 +737,7 @@ function stopGame() {
   clearMovementKeys();
   running = false;
   paused = false;
+  if (chatOpen) closeChat(false);
   net.disconnect();
   if (document.pointerLockElement) document.exitPointerLock();
 
@@ -718,7 +748,6 @@ function stopGame() {
   myId = null;
   myName = null;
   disconnected = false;
-  if (chatOpen) closeChat(false);
 
   clearSession();
   pauseEl.hidden = true;

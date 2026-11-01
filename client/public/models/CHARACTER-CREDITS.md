@@ -2,6 +2,11 @@
 
 Imported models are copies of the user-supplied files. Their original GLB metadata is preserved.
 
+NPC animation is added in memory by `client/src/npc-animation.js`; these GLB
+files are unchanged. Kar-Karych and Yozhik retain their authored skeletons.
+The other six character models receive procedural bones and blended skin
+weights at load time, with gentle idle motion and conversation gestures.
+
 ## kopatych-character.glb
 
 - author: krutoydenis123 (https://sketchfab.com/krutoydenis123)
