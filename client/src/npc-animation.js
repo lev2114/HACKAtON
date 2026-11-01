@@ -3,9 +3,9 @@ import * as THREE from "three";
 const HEIGHT = 1.7;
 // Per-character size tweak by NPC id, on top of HEIGHT: Krosh's height
 // includes his long ears, so at 1.7 m his body looked smaller than the rest.
-// 1.5 was measured: his widest point is 1.30 m vs a 1.94 m median for the
-// others, and his body (without ears) is ~55% of his height vs ~85%.
-const SIZE_BY_NPC = { krosh: 1.5 };
+// Measured ~1.5 (widest point 1.30 m vs a 1.94 m median for the
+// others; body without ears ~55% of height vs ~85%); 1.3 chosen by eye.
+const SIZE_BY_NPC = { krosh: 1.3 };
 // Fractions of each model's full height, including hats/antlers/ears.
 // Round bodies have no separate neck: keep the face, hat and body together.
 const profiles = {
@@ -136,12 +136,14 @@ function lowerArms(model, joints, kind) {
 
 function joint(part, side, bones, axis, walkAxis) {
   const pivot = bones[0].getWorldPosition(new THREE.Vector3());
-  return { part, side, rests: bones.map((bone) => ({
-    bone, quaternion: bone.quaternion.clone(), position: bone.position.clone(),
-    pivot: bone.parent.worldToLocal(pivot.clone()),
-    axis: axis.clone().applyQuaternion(bone.parent.getWorldQuaternion(new THREE.Quaternion()).invert()),
-    walkAxis: walkAxis?.clone().applyQuaternion(bone.parent.getWorldQuaternion(new THREE.Quaternion()).invert()),
-  })) };
+  return {
+    part, side, rests: bones.map((bone) => ({
+      bone, quaternion: bone.quaternion.clone(), position: bone.position.clone(),
+      pivot: bone.parent.worldToLocal(pivot.clone()),
+      axis: axis.clone().applyQuaternion(bone.parent.getWorldQuaternion(new THREE.Quaternion()).invert()),
+      walkAxis: walkAxis?.clone().applyQuaternion(bone.parent.getWorldQuaternion(new THREE.Quaternion()).invert()),
+    }))
+  };
 }
 
 function authoredJoints(bones, kind) {
@@ -174,6 +176,10 @@ function authoredJoints(bones, kind) {
 function addSkeleton(source, model, normalization, size, profile) {
   const lateral = profile.lateral || "x";
   const width = size[lateral];
+  // Actual fitted height (HEIGHT × SIZE_BY_NPC), not the HEIGHT constant:
+  // profile fractions must land on the same body parts at any scale, or a
+  // bigger model's arm zone slides down into the body and drags it along.
+  const height = size.y;
   const root = new THREE.Bone(); root.name = "NPC_root";
   model.add(root);
   const bones = [root];
@@ -184,13 +190,13 @@ function addSkeleton(source, model, normalization, size, profile) {
     parent.add(bone); bones.push(bone);
     return bone;
   }
-  const bodyY = -1 + HEIGHT * 0.38;
+  const bodyY = -1 + height * 0.38;
   const body = addBone("body", root, 0, bodyY);
   const arms = [], legs = [], ears = [];
   for (const sign of [-1, 1]) {
-    arms.push(addBone(`arm_${sign}`, body, sign * width * 0.27, -1 + HEIGHT * profile.shoulder - bodyY));
-    legs.push(addBone(`leg_${sign}`, root, sign * width * 0.12, -1 + HEIGHT * profile.hip));
-    if (profile.ears) ears.push(addBone(`ear_${sign}`, body, sign * width * 0.10, -1 + HEIGHT * profile.ears - bodyY));
+    arms.push(addBone(`arm_${sign}`, body, sign * width * 0.27, -1 + height * profile.shoulder - bodyY));
+    legs.push(addBone(`leg_${sign}`, root, sign * width * 0.12, -1 + height * profile.hip));
+    if (profile.ears) ears.push(addBone(`ear_${sign}`, body, sign * width * 0.10, -1 + height * profile.ears - bodyY));
   }
   model.updateMatrixWorld(true);
   const skeleton = new THREE.Skeleton(bones);
@@ -206,7 +212,7 @@ function addSkeleton(source, model, normalization, size, profile) {
     const weights = new Float32Array(positions.count * 4);
     for (let i = 0; i < positions.count; i++) {
       vertex.fromBufferAttribute(positions, i);
-      const y = (vertex.y + 1) / HEIGHT;
+      const y = (vertex.y + 1) / height;
       const across = Math.abs(vertex[lateral]) / width;
       const side = vertex[lateral] < 0 ? 0 : 1;
       // Feather attachments into the body; the central face remains rigid.
@@ -233,7 +239,7 @@ function addSkeleton(source, model, normalization, size, profile) {
   const axis = lateral === "x" ? new THREE.Vector3(0, 0, 1) : new THREE.Vector3(1, 0, 0);
   const walkAxis = lateral === "x" ? new THREE.Vector3(1, 0, 0) : new THREE.Vector3(0, 0, 1);
   return [joint("body", 0, [body], axis),
-    ...arms.map((bone, i) => joint("arm", i ? 1 : -1, [bone], axis, walkAxis)),
-    ...legs.map((bone, i) => joint("leg", i ? 1 : -1, [bone], walkAxis)),
-    ...ears.map((bone, i) => joint("ear", i ? 1 : -1, [bone], axis))];
+  ...arms.map((bone, i) => joint("arm", i ? 1 : -1, [bone], axis, walkAxis)),
+  ...legs.map((bone, i) => joint("leg", i ? 1 : -1, [bone], walkAxis)),
+  ...ears.map((bone, i) => joint("ear", i ? 1 : -1, [bone], axis))];
 }
