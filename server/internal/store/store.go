@@ -57,6 +57,12 @@ CREATE TABLE IF NOT EXISTS npc_memory (
 	told_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
 	PRIMARY KEY (player_id, npc_id, fact_id)
 );
+CREATE TABLE IF NOT EXISTS player_world_state (
+    player_id TEXT PRIMARY KEY,
+    apples INTEGER NOT NULL DEFAULT 0 CHECK(apples >= 0 AND apples <= 5),
+    suit_color TEXT NOT NULL DEFAULT '#ffffff',
+    last_apple_at INTEGER NOT NULL DEFAULT 0
+);
 `
 
 func Open(path string) (*Store, error) {

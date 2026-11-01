@@ -91,6 +91,17 @@
 
 ## Done
 
+- [x] llm_to_world (9174de6) объединён с main после pull до 53e1272;
+  сохранены прыжки, BVH-коллизия, текстура Пина, масштаб/риг Кроша и logout fix.
+  Конфликт только в UPDATES.md, обе истории сохранены. Client build и Go
+  build/vet прошли, тесты не запускались — Codex, 2026-11-01.
+
+- [x] llm_to_world: просьбы в чате выполняют give_apple / guide_to_door /
+  set_suit_color, через offline intent или Ollama tools с серверной проверкой.
+  Яблоки/F, передача предмета, общий проводник/маркер, индивидуальные цвета,
+  SQLite player_world_state и late-join sync. Client build/Go build/vet прошли;
+  просмотрены ассеты, тесты/игра не запускались — Codex, 2026-11-01.
+
 - [x] Новый Крош 3c913d3f… подключён в hub как krosh-classic-character.glb;
   runtime-риг из 8 костей, опущенные руки, походка/жесты/уши. Оригинал и
   прежняя модель сохранены. Client build прошёл, тесты не запускались

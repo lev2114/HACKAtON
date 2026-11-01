@@ -1,6 +1,7 @@
 import * as THREE from "three";
 import { GLTFLoader } from "three/addons/loaders/GLTFLoader.js";
 import { clone } from "three/addons/utils/SkeletonUtils.js";
+import { createApple, disposeItem } from "./items.js";
 
 const loader = new GLTFLoader();
 const AVATAR_HEIGHT = 1.6;
@@ -64,6 +65,11 @@ export function createRemotePlayer(x, y, z) {
   let disposed = false, model, joints = {}, phase = 0, gaitSpeed = 0;
   let placeholderDisposed = false;
   const rotation = new THREE.Quaternion();
+  let suitColor = "#ffffff";
+  const ownedMaterials = new Set();
+  const heldApple = createApple();
+  heldApple.position.set(0.34, 0.76, 0.2);
+  heldApple.visible = false; visual.add(heldApple);
   function removePlaceholder() {
     if (placeholderDisposed) return;
     placeholderDisposed = true;
@@ -74,6 +80,14 @@ export function createRemotePlayer(x, y, z) {
   loadAstronaut().then((template) => {
     if (disposed) return;
     model = clone(template); // Independent skeleton; geometry/textures shared.
+    const materials = new Map();
+    const ownMaterial = (material) => {
+      if (!materials.has(material)) { const owned = material.clone(); owned.color?.set(suitColor); materials.set(material, owned); ownedMaterials.add(owned); }
+      return materials.get(material);
+    };
+    model.traverse((node) => {
+      if (node.material) node.material = Array.isArray(node.material) ? node.material.map(ownMaterial) : ownMaterial(node.material);
+    });
     joints = prepareRig(model);
     const box = new THREE.Box3().setFromObject(model);
     const scale = AVATAR_HEIGHT / (box.max.y - box.min.y || 1);
@@ -92,6 +106,12 @@ export function createRemotePlayer(x, y, z) {
   });
 
   root.userData.avatar = {
+    setWorldState(state) {
+      if (/^#[0-9a-f]{6}$/i.test(state?.suitColor)) suitColor = state.suitColor;
+      placeholder.material.color.set(suitColor);
+      for (const material of ownedMaterials) material.color?.set(suitColor);
+      heldApple.visible = Number(state?.apples) > 0;
+    },
     setTarget(x, y, z) {
       target.set(x, y, z);
       if (root.position.distanceTo(target) > 4) {
@@ -137,6 +157,9 @@ export function createRemotePlayer(x, y, z) {
       const skeletons = new Set();
       model?.traverse((node) => { if (node.skeleton) skeletons.add(node.skeleton); });
       for (const skeleton of skeletons) skeleton.dispose();
+      for (const material of ownedMaterials) material.dispose();
+      ownedMaterials.clear();
+      disposeItem(heldApple);
       root.clear();
       joints = {};
       model = null;

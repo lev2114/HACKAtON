@@ -344,14 +344,24 @@ func (s *Server) WS(w http.ResponseWriter, r *http.Request) {
 
 	chunk, _ := s.World.Chunk(player.Room)
 	s.facility.mu.Lock()
+	playerState, err := s.Store.WorldState(player.ID)
+	if err != nil {
+		s.facility.mu.Unlock()
+		log.Printf("ws: load world state: %v", err)
+		client.Send(map[string]any{"type": "error", "code": "world_state", "message": "Не удалось загрузить предметы и скафандр"})
+		return
+	}
+	playerState.Revision = s.facility.revision
+	s.Hub.SetWorldState(player.ID, playerState.SuitColor, playerState.Apples)
 	client.Send(map[string]any{
-		"type":     "welcome",
-		"playerId": player.ID,
-		"name":     player.Name,
-		"position": world.Vec3{X: player.X, Y: player.Y, Z: player.Z},
-		"chunk":    chunk,
-		"state":    s.facilitySnapshot(player.Room),
-		"settings": s.clientSettings(),
+		"type":        "welcome",
+		"playerId":    player.ID,
+		"name":        player.Name,
+		"position":    world.Vec3{X: player.X, Y: player.Y, Z: player.Z},
+		"chunk":       chunk,
+		"state":       s.facilitySnapshot(player.Room),
+		"settings":    s.clientSettings(),
+		"playerState": playerState,
 		// Кто уже стоит в этой комнате — без этого видно только тех, кто
 		// присоединился/подвинулся ПОСЛЕ тебя, а не тех, кто был раньше.
 		"players": s.Hub.PlayersInRoom(player.Room, player.ID),
@@ -360,6 +370,7 @@ func (s *Server) WS(w http.ResponseWriter, r *http.Request) {
 	s.Hub.BroadcastToRoom(player.Room, player.ID, map[string]any{
 		"type": "player_joined", "playerId": player.ID, "name": player.Name,
 		"x": player.X, "y": player.Y, "z": player.Z,
+		"suitColor": playerState.SuitColor, "apples": playerState.Apples,
 	})
 
 	for {
@@ -372,17 +383,19 @@ func (s *Server) WS(w http.ResponseWriter, r *http.Request) {
 }
 
 type incoming struct {
-	Active    bool    `json:"active"`
-	RequestID uint64  `json:"requestId"`
-	Door      string  `json:"door"`
-	Open      bool    `json:"open"`
-	Type      string  `json:"type"`
-	Room      string  `json:"room"`
-	X         float64 `json:"x"`
-	Y         float64 `json:"y"`
-	Z         float64 `json:"z"`
-	NpcID     string  `json:"npcId"`
-	Message   string  `json:"message"`
+	Item           string  `json:"item"`
+	ConversationID uint64  `json:"-"`
+	Active         bool    `json:"active"`
+	RequestID      uint64  `json:"requestId"`
+	Door           string  `json:"door"`
+	Open           bool    `json:"open"`
+	Type           string  `json:"type"`
+	Room           string  `json:"room"`
+	X              float64 `json:"x"`
+	Y              float64 `json:"y"`
+	Z              float64 `json:"z"`
+	NpcID          string  `json:"npcId"`
+	Message        string  `json:"message"`
 
 	// pong
 	ID        uint64  `json:"id"`
@@ -450,6 +463,8 @@ func (s *Server) handleMessage(ctx context.Context, replyBusy *atomic.Bool, clie
 	}
 
 	switch msg.Type {
+	case "use_item":
+		s.onUseItem(client, player, msg)
 	case "npc_conversation":
 		s.onNpcConversation(client, player, msg)
 	case "door_set":
@@ -467,6 +482,9 @@ func (s *Server) handleMessage(ctx context.Context, replyBusy *atomic.Bool, clie
 			client.Send(map[string]any{"type": "error", "code": "npc_busy", "message": "Дождись предыдущего ответа и отправь вопрос ещё раз", "requestId": msg.RequestID})
 			return
 		}
+		s.facility.mu.Lock()
+		msg.ConversationID = s.facility.conversations[player.ID].id
+		s.facility.mu.Unlock()
 		playerCopy := *player // Read loop can keep updating player while AI runs.
 		go func() {
 			defer replyBusy.Store(false)
@@ -546,9 +564,11 @@ func (s *Server) onChunkRequest(client *hub.Client, player *store.Player, msg in
 		"players": s.Hub.PlayersInRoom(msg.Room, player.ID),
 	})
 	s.Hub.BroadcastToRoom(oldRoom, player.ID, map[string]any{"type": "player_left", "playerId": player.ID})
+	appearance, _ := s.Hub.Player(player.ID)
 	s.Hub.BroadcastToRoom(msg.Room, player.ID, map[string]any{
 		"type": "player_joined", "playerId": player.ID, "name": player.Name,
 		"x": player.X, "y": player.Y, "z": player.Z,
+		"suitColor": appearance.SuitColor, "apples": appearance.Apples,
 	})
 }
 
@@ -556,6 +576,19 @@ func (s *Server) onNpcTalk(ctx context.Context, client *hub.Client, player *stor
 	npc, ok := s.World.NPC(msg.NpcID)
 	if !ok {
 		s.Hub.SendToClient(client, map[string]any{"type": "error", "code": "unknown_npc", "message": "нет такого NPC: " + msg.NpcID, "requestId": msg.RequestID})
+		return
+	}
+	proposal, planErr := s.AI.PlanWorldAction(ctx, npc, msg.Message, player.ID)
+	if ctx.Err() != nil {
+		return
+	}
+	if planErr != nil {
+		log.Printf("npc action planner %s: %v", npc.ID, planErr)
+	}
+	if proposal != nil {
+		text := s.executeWorldAction(client, npc, msg, proposal)
+		s.AI.RecordWorldAction(npc.ID, player.ID, msg.Message, text)
+		s.Hub.SendToClient(client, map[string]any{"type": "npc_response", "npcId": npc.ID, "npcName": npc.Name, "text": text, "requestId": msg.RequestID})
 		return
 	}
 

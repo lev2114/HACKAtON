@@ -4,6 +4,7 @@ import { buildRoom, destroyRoom } from "./world.js";
 import { createCosmicSky } from "./sky.js";
 import { createRemotePlayer } from "./players.js";
 import { CORRIDOR_DEPTH } from "./doors.js";
+import { createApple } from "./items.js";
 
 // Рисуем приглушённый звёздный фон для экрана входа один раз на canvas и
 // подставляем как CSS-фон — не трогает игровую сцену/рендер-луп (тот
@@ -45,6 +46,13 @@ const cosmicSky = createCosmicSky();
 const camera = new THREE.PerspectiveCamera(70, window.innerWidth / window.innerHeight, 0.1, 500);
 camera.position.set(0, 1.6, 5);
 camera.rotation.order = "YXZ";
+scene.add(camera);
+const carriedApple = createApple();
+carriedApple.position.set(0.23, -0.27, -0.48);
+carriedApple.scale.setScalar(0.7);
+carriedApple.traverse((node) => { if (node.isMesh) { node.material.depthTest = false; node.renderOrder = 100; } });
+carriedApple.visible = false;
+camera.add(carriedApple);
 
 // На ноутбуках с двумя видеокартами браузер по умолчанию берёт встроенную:
 // на Intel UHD вестибюль даёт ~8 FPS, на GTX 1660 Ti — ~200. Это только
@@ -93,6 +101,34 @@ let myName = null;
 let disconnected = false;
 let running = false; // тик идёт только пока мы реально в игре (не на логине/паузе)
 let paused = false;
+let myWorldState = { apples: 0, suitColor: "#ffffff", revision: -1 };
+let noticeUntil = 0;
+
+function itemNotice(text) {
+  document.getElementById("item-notice").textContent = text;
+  noticeUntil = performance.now() + 4500;
+}
+
+function applyPlayerWorldState(state) {
+  if (!state) return;
+  if (state.playerId === myId) {
+    if (state.revision < myWorldState.revision) return;
+    myWorldState = state;
+    carriedApple.visible = state.apples > 0;
+    document.getElementById("suit-swatch").style.background = state.suitColor;
+    const names = { "#ffffff":"белый", "#ef5350":"красный", "#ff9800":"оранжевый", "#ffdf55":"жёлтый", "#66bb6a":"зелёный", "#4dd0e1":"голубой", "#4f83ff":"синий", "#ab68dc":"фиолетовый", "#f48fb1":"розовый", "#505766":"чёрный" };
+    document.getElementById("suit-color-name").textContent = names[state.suitColor] || state.suitColor;
+    document.getElementById("apple-count").textContent = `Яблоки: ${state.apples} · ${state.apples ? "F — съесть" : "попроси Совунью"}`;
+  } else {
+    players.get(state.playerId)?.userData.avatar.setWorldState(state);
+  }
+}
+
+net.onPlayerState(applyPlayerWorldState);
+net.onNpcAction((message) => {
+  if (message.room === currentRoomBuilt?.room.id) currentRoomBuilt.actions.event(message);
+  if (message.playerId === myId) itemNotice(message.action === "give_apple" ? "Совунья дала тебе яблоко" : "Нюша перекрасила скафандр");
+});
 
 // "Запомнить меня": токен сессии живёт в localStorage, чтобы обновление
 // страницы не требовало повторного ввода пароля. Хранить сам пароль нельзя,
@@ -213,6 +249,7 @@ function openChat(npcId, npcName) {
   chatNpcId = npcId;
   chatNpcName = npcName;
   chatWaiting = false;
+  npcDialogInput.placeholder = npcId.startsWith("sovunya") ? "Например: Дай мне яблоко" : npcId === "krosh" ? "Например: Проводи меня в медблок" : npcId === "nyusha" ? "Например: Сделай мой скафандр синим" : "Спроси что-нибудь…";
 
   net.send("move", { x: camera.position.x, y: camera.position.y, z: camera.position.z });
   net.setNpcConversation(npcId, true);
@@ -362,14 +399,16 @@ function makeNameTag(name) {
   return sprite;
 }
 
-function spawnPlayerMesh(id, name, x, y, z) {
+function spawnPlayerMesh(id, name, x, y, z, appearance = {}) {
   const existing = players.get(id);
   if (existing) {
     existing.position.set(x, y, z);
     existing.userData.avatar.setTarget(x, y, z);
+    existing.userData.avatar.setWorldState(appearance);
     return existing;
   }
   const mesh = createRemotePlayer(x, y, z);
+  mesh.userData.avatar.setWorldState(appearance);
   mesh.add(makeNameTag(name || "?"));
   scene.add(mesh);
   players.set(id, mesh);
@@ -416,7 +455,7 @@ async function enterChunk(chunk, teleport, roster, sharedState) {
   // события ПОСЛЕ нашего входа, без ростера мы бы их никогда не увидели.
   for (const p of roster || []) {
     if (p.playerId === myId) continue;
-    spawnPlayerMesh(p.playerId, p.name, p.x, p.y, p.z);
+    spawnPlayerMesh(p.playerId, p.name, p.x, p.y, p.z, p);
   }
   updateHud();
   await roomCleanup;
@@ -445,6 +484,8 @@ function separateSpawn(position, room, roster = []) {
 net.on("welcome", (msg) => {
   myId = msg.playerId;
   myName = msg.name;
+  myWorldState = { apples:0, suitColor:"#ffffff", revision:-1 };
+  applyPlayerWorldState(msg.playerState || { playerId:myId, apples:0, suitColor:"#ffffff", revision:0 });
   clearUserDialogueHistories();
   disconnected = false;
   applySettings(msg.settings);
@@ -488,7 +529,7 @@ net.on("announcement", (msg) => {
 
 net.on("player_joined", (msg) => {
   if (msg.playerId === myId) return;
-  spawnPlayerMesh(msg.playerId, msg.name, msg.x, msg.y, msg.z);
+  spawnPlayerMesh(msg.playerId, msg.name, msg.x, msg.y, msg.z, msg);
   updateHud();
 });
 
@@ -513,6 +554,7 @@ net.on("npc_response", (msg) => {
 });
 
 net.on("error", (msg) => {
+  if (msg.code === "item_empty" || msg.code === "item_error") { itemNotice(msg.message); return; }
   if (msg.code === "kicked") {
     stopGame();
     loginError.textContent = msg.message;
@@ -546,6 +588,10 @@ let verticalVelocity = 0;
 let isJumping = false;
 
 const keys = {};
+window.addEventListener("keydown", (event) => {
+  if (event.code !== "KeyF" || event.repeat || !running || paused || chatOpen || disconnected || !currentRoomBuilt?.ready) return;
+  net.useApple();
+});
 window.addEventListener("keydown", (e) => {
   if (e.code === "Space") {
     if (!chatOpen && running && !paused && document.activeElement?.tagName !== "INPUT") {
@@ -812,6 +858,13 @@ function tick() {
   if (!paused) currentRoomBuilt?.doors.update(dt);
   if (!disconnected) currentRoomBuilt?.roombas?.update(dt);
   if (!disconnected) currentRoomBuilt?.npcMotion.update(dt);
+  if (!disconnected) currentRoomBuilt?.actions.update(dt, myId);
+  const guide = currentRoomBuilt?.sharedState?.npcs?.find((npc) => npc.guidePlayer === myId);
+  const guideName = guide && currentRoomBuilt.neighbors.find((room) => room.id === guide.guideRoom)?.name;
+  const guideText = guide ? (guide.guideArrived ? `Вот дверь: ${guideName}. Подойди и нажми E.` : chatOpen ? "Крош готов проводить. Закрой чат (Esc)." : `Иди за Крошем → ${guideName}`) : "";
+  const guideHint = document.getElementById("guide-hint");
+  if (guideHint.textContent !== guideText) guideHint.textContent = guideText;
+  if (noticeUntil && performance.now() > noticeUntil) { document.getElementById("item-notice").textContent = ""; noticeUntil = 0; }
   if (!disconnected && chatOpen && performance.now() - lastConversationHeartbeat > 5000) {
     net.setNpcConversation(chatNpcId, true);
     lastConversationHeartbeat = performance.now();
@@ -882,6 +935,7 @@ function tick() {
 }
 
 function startGame() {
+  document.getElementById("equipment").hidden = false;
   loginEl.style.display = "none";
   pauseEl.hidden = true;
   paused = false;
@@ -894,6 +948,10 @@ function startGame() {
 // Выход: рвёт соединение (без "потеряно"-сообщения), чистит состояние сцены
 // и "запомни меня", возвращает на экран входа.
 function stopGame() {
+  document.getElementById("equipment").hidden = true;
+  carriedApple.visible = false;
+  noticeUntil = 0;
+  document.getElementById("item-notice").textContent = "";
   facilityRoom = null;
   facilityState = null;
   clearMovementKeys();
