@@ -868,7 +868,10 @@ function stopGame() {
   if (document.pointerLockElement) document.exitPointerLock();
 
   ++roomVersion; // отменяет любой незавершённый enterChunk, не даёт ему достроить комнату после logout
-  roomCleanup = roomCleanup.then(() => destroyRoom(scene, currentRoomBuilt));
+  // Захватываем комнату сейчас: колбэк выполнится позже, когда
+  // currentRoomBuilt уже null (или новая комната после повторного входа).
+  const previous = currentRoomBuilt;
+  roomCleanup = roomCleanup.then(() => destroyRoom(scene, previous));
   currentRoomBuilt = null;
   for (const id of [...players.keys()]) removePlayerMesh(id);
   myId = null;
