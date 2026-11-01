@@ -9,7 +9,7 @@ const DOWN = new THREE.Vector3(0, -1, 0);
 
 // Use the actual stair wedges and gallery opening, rather than their AABBs:
 // a box around the ring would incorrectly fill the atrium and stairwell.
-export function createRoomCollision(root, npcMeshes = {}) {
+export function createRoomCollision(root, npcMeshes = {}, extraRoots = []) {
   const surfaces = [], solids = [];
   const ray = new THREE.Raycaster();
   const normalMatrix = new THREE.Matrix3();
@@ -22,14 +22,17 @@ export function createRoomCollision(root, npcMeshes = {}) {
   const radialDirections = Array.from({ length: 8 }, (_, i) =>
     new THREE.Vector3(Math.cos(i * Math.PI / 4), 0, Math.sin(i * Math.PI / 4)));
 
-  root.traverseVisible((mesh) => {
-    if (!mesh.isMesh) return;
-    const entry = { mesh, box: new THREE.Box3().setFromObject(mesh) };
-    solids.push(entry);
-    if (/continuous.*floor|level.*floor|floor.*disc|Stair.*tread|Gallery.*walking.surface|corridor.*floor|level.connection/i.test(mesh.name)) {
-      surfaces.push(entry);
-    }
-  });
+  for (const collisionRoot of [root, ...extraRoots]) {
+    collisionRoot.updateWorldMatrix(true, true);
+    collisionRoot.traverseVisible((mesh) => {
+      if (!mesh.isMesh) return;
+      const entry = { mesh, box: new THREE.Box3().setFromObject(mesh) };
+      solids.push(entry);
+      if (/continuous.*floor|level.*floor|floor.*disc|Stair.*tread|Gallery.*walking.surface|corridor.*floor|level.connection/i.test(mesh.name)) {
+        surfaces.push(entry);
+      }
+    });
+  }
   if (!surfaces.length) throw new Error(`Room model ${root.name} has no walkable surfaces`);
 
   function floorAt(x, z, feetY) {
@@ -103,6 +106,28 @@ export function createRoomCollision(root, npcMeshes = {}) {
   }
 
   return {
+    cleanerFloor(x, z, feetY, radius = 0.25, height = 0.22) {
+      const floor = floorAt(x, z, feetY);
+      if (floor === null || Math.abs(floor - feetY) > 0.06) return null;
+      for (const npc of Object.values(npcMeshes)) {
+        if (Math.abs(npc.position.y - floor - 1) < 0.5 &&
+            Math.hypot(npc.position.x - x, npc.position.z - z) < radius + 0.55) return null;
+      }
+      candidateBox.min.set(x - radius, floor + 0.03, z - radius);
+      candidateBox.max.set(x + radius, floor + height, z + radius);
+      const nearby = solids.filter(({ box }) => box.intersectsBox(candidateBox)).map(({ mesh }) => mesh);
+      origin.set(x, floor + height / 2, z);
+      if (solids.some(({ box }) => box.intersectsBox(candidateBox) && box.containsPoint(origin))) return null;
+      for (const y of [floor + 0.04, floor + height / 2, floor + height]) {
+        origin.set(x, y, z);
+        for (const direction of radialDirections) {
+          ray.set(origin, direction);
+          ray.far = radius + 0.04;
+          if (ray.intersectObjects(nearby, false).length) return null;
+        }
+      }
+      return floor;
+    },
     move(position, delta) {
       const floor = floorAt(position.x, position.z, position.y - EYE_HEIGHT);
       if (floor !== null) position.y = floor + EYE_HEIGHT;

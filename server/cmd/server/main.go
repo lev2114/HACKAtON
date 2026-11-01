@@ -4,6 +4,7 @@
 package main
 
 import (
+	"context"
 	"log"
 	"net/http"
 	"os"
@@ -46,6 +47,7 @@ func main() {
 	h := hub.New()
 	responder := ai.New(ollamaURL, model)
 	srv := httpapi.New(w, st, h, responder)
+	go srv.RunFacility(context.Background())
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("/api/register", srv.Register)

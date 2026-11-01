@@ -4,6 +4,8 @@
 import * as THREE from "three";
 import { GLTFLoader } from "three/addons/loaders/GLTFLoader.js";
 import { createRoomCollision } from "./collision.js";
+import { createDoors } from "./doors.js";
+import { createRoombas } from "./roombas.js";
 
 const loader = new GLTFLoader();
 async function loadModel(url, built) {
@@ -55,7 +57,7 @@ export function buildRoom(scene, chunk) {
   const built = {
     group, npcMeshes: {}, room, neighbors: chunk.neighbors || [],
     controller: new AbortController(), loads: [], disposed: false,
-    ready: !room.model, error: null, collision: null,
+    ready: !room.model, error: null, collision: null, roombas: null,
   };
 
   // room.position — это абсолютные мировые координаты (как и у NPC ниже),
@@ -74,6 +76,12 @@ export function buildRoom(scene, chunk) {
   }
 
   addDoorwayLight(group, room, chunk.neighbors);
+  built.doors = createDoors(group, room, built.neighbors);
+  built.applyState = (state, instant = false) => {
+    built.sharedState = state;
+    built.doors.applyState(state, instant);
+    built.roombas?.applyState(state);
+  };
 
   scene.add(group);
   return built;
@@ -232,13 +240,22 @@ function buildModelRoom(built) {
     .then((instance) => {
       fitModelToRoom(instance, room);
       openConnectedDoors(instance, room);
+      clearDoorwayTrim(instance, room);
       group.add(instance);
       instance.updateWorldMatrix(true, true);
-      if (room.collision === "walkmesh") built.collision = createRoomCollision(instance, built.npcMeshes);
+      if (room.collision === "walkmesh") built.collision = createRoomCollision(instance, built.npcMeshes, [built.doors.corridors]);
       group.remove(placeholder);
       placeholder.geometry.dispose();
       placeholder.material.dispose();
       built.ready = true;
+      if (built.collision) {
+        built.loads.push(loadModel("/models/roomba.glb", built).then((template) => {
+          built.roombas = createRoombas(template, room, built.sharedState);
+          group.add(built.roombas.group);
+        }).catch((error) => {
+          if (error.name !== "AbortError") console.error(`Roomba ${room.id}:`, error);
+        }));
+      }
     })
     .catch((err) => {
       if (err.name === "AbortError") return;
@@ -254,6 +271,11 @@ function openConnectedDoors(root, room) {
   root.traverse((node) => {
     if (!node.userData.roomDoor || !destinations.has(node.userData.destination)) return;
     node.traverse((part) => {
+      if (/destination.plaque|room.label/i.test(part.name)) {
+        // Authored door +Z points into the lobby, opposite the corridor.
+        // Bring the plaque and its lettering forward together.
+        part.position.z += 0.2;
+      }
       if (/sliding.panel|cream.lower.inset|destination.color.strip|central.rubber.seal|large.number/i.test(part.name)) {
         part.visible = false;
       }
@@ -261,12 +283,49 @@ function openConnectedDoors(root, room) {
   });
 }
 
+// The authored lower wall trim continues across some door openings. Hide
+// only trim segments touching a connected opening, before collecting solids.
+// Stair and gallery safety railings remain intact; the source GLB is unchanged.
+function clearDoorwayTrim(root, room) {
+  root.updateWorldMatrix(true, true);
+  const point = new THREE.Vector3();
+  root.traverse((node) => {
+    if (!node.isMesh || !/lower.dado.seam/i.test(node.name)) return;
+    const bounds = new THREE.Box3().setFromObject(node);
+    for (const door of room.doors || []) {
+      const length = Math.hypot(door.position.x, door.position.z) || 1;
+      const nx = door.position.x / length, nz = door.position.z / length;
+      const x = room.position.x + door.position.x, z = room.position.z + door.position.z;
+      const floorY = room.position.y + door.position.y;
+      if (bounds.max.y < floorY || bounds.min.y > floorY + 2.6) continue;
+      let minAlong = Infinity, maxAlong = -Infinity, minAcross = Infinity, maxAcross = -Infinity;
+      for (const px of [bounds.min.x, bounds.max.x]) {
+        for (const pz of [bounds.min.z, bounds.max.z]) {
+          point.set(px - x, 0, pz - z);
+          const along = point.x * nx + point.z * nz;
+          const across = point.x * nz - point.z * nx;
+          minAlong = Math.min(minAlong, along); maxAlong = Math.max(maxAlong, along);
+          minAcross = Math.min(minAcross, across); maxAcross = Math.max(maxAcross, across);
+        }
+      }
+      const width = door.halfWidth + 0.35;
+      if (minAlong <= 0.45 && maxAlong >= -0.45 && minAcross <= width && maxAcross >= -width) {
+        node.visible = false;
+        break;
+      }
+    }
+  });
+}
+
 export async function destroyRoom(scene, built) {
   if (!built) return;
   built.disposed = true;
   built.controller.abort();
+  built.doors.closeAll();
   scene.remove(built.group);
   built.collision = null;
+  built.doors = null;
+  built.roombas = null;
   disposeOwnedResources(built.group);
   built.group.clear();
   built.npcMeshes = {};

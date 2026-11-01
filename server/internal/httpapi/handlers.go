@@ -11,6 +11,7 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"math"
 	"net"
 	"net/http"
 	"strings"
@@ -28,10 +29,11 @@ import (
 )
 
 type Server struct {
-	World *world.World
-	Store *store.Store
-	Hub   *hub.Hub
-	AI    *ai.Responder
+	World    *world.World
+	Store    *store.Store
+	Hub      *hub.Hub
+	AI       *ai.Responder
+	facility *facilityState
 
 	upgrader websocket.Upgrader
 
@@ -45,10 +47,11 @@ type Server struct {
 
 func New(w *world.World, st *store.Store, h *hub.Hub, responder *ai.Responder) *Server {
 	return &Server{
-		World: w,
-		Store: st,
-		Hub:   h,
-		AI:    responder,
+		World:    w,
+		Store:    st,
+		Hub:      h,
+		AI:       responder,
+		facility: newFacility(w),
 		upgrader: websocket.Upgrader{
 			ReadBufferSize:  1024,
 			WriteBufferSize: 1024,
@@ -252,6 +255,25 @@ func (s *Server) WS(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "invalid token", http.StatusUnauthorized)
 		return
 	}
+	if _, valid := s.World.Rooms[player.Room]; !valid || math.IsNaN(player.X) || math.IsNaN(player.Y) || math.IsNaN(player.Z) || math.IsInf(player.X, 0) || math.IsInf(player.Y, 0) || math.IsInf(player.Z, 0) {
+		room, exists := s.World.Rooms["hub"]
+		if !exists {
+			http.Error(w, "starting room unavailable", http.StatusInternalServerError)
+			return
+		}
+		player.Room = "hub"
+		player.X, player.Y, player.Z = room.Position.X, room.Position.Y+1.6, room.Position.Z
+		if room.Spawn != nil {
+			player.X += room.Spawn.X
+			player.Y = room.Position.Y + room.Spawn.Y
+			player.Z += room.Spawn.Z
+		}
+		if err := s.Store.SavePosition(player.ID, player.Room, player.X, player.Y, player.Z); err != nil {
+			log.Printf("ws: recover room for %s: %v", player.ID, err)
+			http.Error(w, "could not restore player room", http.StatusInternalServerError)
+			return
+		}
+	}
 
 	conn, err := s.upgrader.Upgrade(w, r, nil)
 	if err != nil {
@@ -260,13 +282,22 @@ func (s *Server) WS(w http.ResponseWriter, r *http.Request) {
 	}
 
 	client := hub.NewClient(conn, player.ID, player.Name, player.Room)
-	s.Hub.Register(client)
+	if !s.Hub.Register(client) {
+		if err := conn.WriteJSON(map[string]any{"type": "error", "code": "session_in_use", "message": "Этот аккаунт уже подключён. Выйди в другом окне или используй другой аккаунт."}); err != nil {
+			log.Printf("ws: duplicate session: %v", err)
+		}
+		conn.Close()
+		return
+	}
 	s.Hub.UpdatePosition(player.ID, player.Room, player.X, player.Y, player.Z)
 	go client.WritePump()
 
 	defer func() {
 		room := s.Hub.RoomOf(player.ID) // перед Unregister — потом хаб его уже не помнит
 		s.Hub.Unregister(player.ID)
+		s.facility.mu.Lock()
+		s.closeRoomDoors(room)
+		s.facility.mu.Unlock()
 		client.Close()
 		if err := s.Store.SavePosition(player.ID, room, player.X, player.Y, player.Z); err != nil {
 			log.Printf("disconnect: save error for %s: %v", player.ID, err)
@@ -278,16 +309,19 @@ func (s *Server) WS(w http.ResponseWriter, r *http.Request) {
 	}()
 
 	chunk, _ := s.World.Chunk(player.Room)
+	s.facility.mu.Lock()
 	client.Send(map[string]any{
 		"type":     "welcome",
 		"playerId": player.ID,
 		"name":     player.Name,
 		"position": world.Vec3{X: player.X, Y: player.Y, Z: player.Z},
 		"chunk":    chunk,
+		"state":    s.facilitySnapshot(player.Room),
 		// Кто уже стоит в этой комнате — без этого видно только тех, кто
 		// присоединился/подвинулся ПОСЛЕ тебя, а не тех, кто был раньше.
 		"players": s.Hub.PlayersInRoom(player.Room, player.ID),
 	})
+	s.facility.mu.Unlock()
 	s.Hub.BroadcastToRoom(player.Room, player.ID, map[string]any{
 		"type": "player_joined", "playerId": player.ID, "name": player.Name,
 		"x": player.X, "y": player.Y, "z": player.Z,
@@ -303,6 +337,8 @@ func (s *Server) WS(w http.ResponseWriter, r *http.Request) {
 }
 
 type incoming struct {
+	Door    string  `json:"door"`
+	Open    bool    `json:"open"`
 	Type    string  `json:"type"`
 	Room    string  `json:"room"`
 	X       float64 `json:"x"`
@@ -320,6 +356,8 @@ func (s *Server) handleMessage(client *hub.Client, player *store.Player, raw []b
 	}
 
 	switch msg.Type {
+	case "door_set":
+		s.onDoorSet(client, player, msg)
 	case "move":
 		s.onMove(client, player, msg)
 	case "chunk_request":
@@ -360,14 +398,32 @@ func (s *Server) onMove(client *hub.Client, player *store.Player, msg incoming) 
 }
 
 func (s *Server) onChunkRequest(client *hub.Client, player *store.Player, msg incoming) {
+	s.facility.mu.Lock()
+	defer s.facility.mu.Unlock()
+	oldRoom := s.Hub.RoomOf(player.ID)
+	if !s.canUseDoor(oldRoom, msg.Room, player) {
+		s.transitionError(client)
+		return
+	}
 	chunk, ok := s.World.Chunk(msg.Room)
 	if !ok {
 		client.Send(map[string]any{"type": "error", "code": "unknown_room", "message": "нет такой комнаты: " + msg.Room})
 		return
 	}
 
-	oldRoom := s.Hub.RoomOf(player.ID)
+	for _, door := range chunk.Room.Doors {
+		if door.Room != oldRoom {
+			continue
+		}
+		length := math.Hypot(door.Position.X, door.Position.Z)
+		player.X = chunk.Room.Position.X + door.Position.X - door.Position.X/length*1.4
+		player.Y = chunk.Room.Position.Y + door.Position.Y + 1.6
+		player.Z = chunk.Room.Position.Z + door.Position.Z - door.Position.Z/length*1.4
+		break
+	}
+	player.Room = msg.Room
 	s.Hub.UpdatePosition(player.ID, msg.Room, player.X, player.Y, player.Z)
+	s.closeRoomDoors(oldRoom)
 	if err := s.Store.SavePosition(player.ID, msg.Room, player.X, player.Y, player.Z); err != nil {
 		log.Printf("chunk_request: save error for %s: %v", player.ID, err)
 	}
@@ -375,6 +431,7 @@ func (s *Server) onChunkRequest(client *hub.Client, player *store.Player, msg in
 	client.Send(map[string]any{
 		"type":    "chunk_data",
 		"chunk":   chunk,
+		"state":   s.facilitySnapshot(msg.Room),
 		"players": s.Hub.PlayersInRoom(msg.Room, player.ID),
 	})
 	s.Hub.BroadcastToRoom(oldRoom, player.ID, map[string]any{"type": "player_left", "playerId": player.ID})

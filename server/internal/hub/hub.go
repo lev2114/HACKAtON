@@ -82,10 +82,16 @@ func New() *Hub {
 	return &Hub{clients: map[string]*Client{}}
 }
 
-func (h *Hub) Register(c *Client) {
+func (h *Hub) Register(c *Client) bool {
 	h.mu.Lock()
+	defer h.mu.Unlock()
+	// Replacing an existing connection lets its cleanup unregister the new
+	// one, eventually persisting an empty room. Keep one socket per account.
+	if _, exists := h.clients[c.PlayerID]; exists {
+		return false
+	}
 	h.clients[c.PlayerID] = c
-	h.mu.Unlock()
+	return true
 }
 
 func (h *Hub) Unregister(playerID string) {

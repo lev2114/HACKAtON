@@ -204,3 +204,33 @@ Room id сохранены. В каждой комнате один NPC; пов�
 Отдельные флаги walking/running и yaw не передаются. Shift увеличивает
 локальную скорость с 4 до 7 м/с; сервер пересылает полученные координаты как прежде.
 Аватар размещает ноги на y - 1.6 (сетевой y — высота глаз), над шлемом остаётся имя.
+
+## Интерактивные двери
+
+По каждому room.doors клиент создаёт закрытую раздвижную дверь. E открывает/
+закрывает её; chunk_request отправляется при пересечении только после полного
+открытия. При уходе сервер закрывает двери для всех после освобождения проёма; новый
+клиент получает актуальное состояние при входе.
+Состояние общее на сервере через door_set/room_state (см. ниже). Дверь рядом имеет приоритет E перед NPC-чатом.
+
+За каждым проёмом клиент создаёт коридор глубиной 3 м в составе текущего
+чанка. При открытой двери chunk_request отправляется в центре коридора, на глубине 1.5 м,
+перед торцевой стеной; GLB соседней комнаты до перехода не загружается.
+Размер створок увеличен с перекрытием рамы, контракт room.doors прежний.
+
+## Shared facility state (server authoritative)
+
+[BREAKING] Updated client and server must be deployed together.
+Client -> server: door_set {room: current room ID, door: destination room ID, open: boolean}.
+Server -> client: room_state {state:{room, revision, doors:[{room,open}], roombas:[{id,x,y,z,heading}]}}.
+welcome and chunk_data include state:{room,revision,doors,roombas}.
+Only current-room actors are sent. Revisions increase monotonically within a server run;
+clients ignore stale snapshots and retain only the snapshot for the room being entered.
+Doors are shared by the two connected rooms. Server validates proximity and rejects
+closing on any player. A successful room transition requests closure of the old room's
+doors; occupied openings close once clear. Disconnect requests the same closure.
+chunk_request requires a connected open door and a player at the corridor center.
+Roombas are simulated at 10 Hz by the server on world-data/roomba-nav.json, prepared
+offline from GLB floor/obstacle geometry. Clients interpolate poses, with no local RNG.
+No room geometry/navigation grid is sent to clients. Door and cleaner state is in memory
+and resets on server restart.

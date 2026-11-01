@@ -3,6 +3,7 @@ import { Net } from "./net.js";
 import { buildRoom, destroyRoom } from "./world.js";
 import { createCosmicSky } from "./sky.js";
 import { createRemotePlayer } from "./players.js";
+import { CORRIDOR_DEPTH } from "./doors.js";
 
 // Рисуем приглушённый звёздный фон для экрана входа один раз на canvas и
 // подставляем как CSS-фон — не трогает игровую сцену/рендер-луп (тот
@@ -68,6 +69,14 @@ window.__sharolet.players = players; // для отладки/автотесто
 let currentRoomBuilt = null;
 let roomCleanup = Promise.resolve();
 let roomVersion = 0;
+let facilityRoom = null;
+let facilityState = null;
+
+net.onRoomState((state) => {
+  if (!state || state.room !== facilityRoom || (facilityState && state.revision < facilityState.revision)) return;
+  facilityState = state;
+  currentRoomBuilt?.applyState(state);
+});
 let myId = null;
 let myName = null;
 let disconnected = false;
@@ -306,7 +315,9 @@ function removePlayerMesh(id) {
 
 // On transitions, place the player just inside the matching return doorway
 // (computeEntryPoint). roster — те, кто уже стоит в комнате, см. ниже.
-async function enterChunk(chunk, teleport, roster) {
+async function enterChunk(chunk, teleport, roster, sharedState) {
+  facilityRoom = chunk.room.id;
+  facilityState = sharedState;
   const version = ++roomVersion;
   const previous = currentRoomBuilt;
   currentRoomBuilt = null;
@@ -335,6 +346,7 @@ async function enterChunk(chunk, teleport, roster) {
   if (version !== roomVersion) return;
   renderer.renderLists.dispose();
   currentRoomBuilt = buildRoom(scene, chunk);
+  if (facilityState) currentRoomBuilt.applyState(facilityState, true);
   updateHud();
 }
 
@@ -357,14 +369,14 @@ net.on("welcome", (msg) => {
   myId = msg.playerId;
   myName = msg.name;
   disconnected = false;
-  enterChunk(msg.chunk, separateSpawn(msg.position, msg.chunk.room, msg.players), msg.players);
+  enterChunk(msg.chunk, separateSpawn(msg.position, msg.chunk.room, msg.players), msg.players, msg.state);
 });
 
 net.on("chunk_data", (msg) => {
   pendingRoomId = null;
   const entry = computeEntryPoint(msg.chunk.room, fromRoomForTransition);
   fromRoomForTransition = null;
-  enterChunk(msg.chunk, entry, msg.players);
+  enterChunk(msg.chunk, entry, msg.players, msg.state);
 });
 
 net.on("player_joined", (msg) => {
@@ -445,11 +457,21 @@ function findNearestNpc() {
   return closest && closest.dist < 3 ? closest : null;
 }
 
-// Нажатие E — открыть диалог с ближайшим NPC
+// Nearby doorway controls take priority over NPC interaction.
 window.addEventListener("keydown", (e) => {
   // Не реагируем на E, если чат уже открыт (чтобы можно было набирать букву "е")
   if (chatOpen) return;
-  if (e.code !== "KeyE") return;
+  if (e.code !== "KeyE" || e.repeat || !running || paused || disconnected || pendingRoomId || !currentRoomBuilt?.ready) return;
+
+  const door = currentRoomBuilt.doors.nearest(camera.position, yaw);
+  if (door) {
+    const change = currentRoomBuilt.doors.toggle(door, camera.position);
+    if (change) {
+      net.send("move", { x: camera.position.x, y: camera.position.y, z: camera.position.z });
+      net.setDoor(currentRoomBuilt.room.id, change.door, change.open);
+    }
+    return;
+  }
 
   const near = findNearestNpc();
   if (near) {
@@ -518,7 +540,7 @@ function isAtDoor(room, door, x, z, y = camera.position.y) {
   const relZ = z - room.position.z;
   const along = (relX * dx + relZ * dz) / length;
   const lateral = (-relX * dz + relZ * dx) / length;
-  return along >= length - 1.5 && along <= length + 1 && Math.abs(lateral) < door.halfWidth;
+  return along >= length - 1.5 && along <= length + CORRIDOR_DEPTH && Math.abs(lateral) < door.halfWidth + 0.05;
 }
 
 // Возвращает (x, z), в которые реально можно встать: как есть, если игрок
@@ -593,16 +615,11 @@ function maybeAutoEnterNeighbor() {
   if (!currentRoomBuilt?.ready || pendingRoomId || disconnected) return;
   const { room, neighbors } = currentRoomBuilt;
   if (room.doors) {
-    const door = room.doors.find((entry) => {
-      if (!isAtDoor(room, entry, camera.position.x, camera.position.z)) return false;
-      const { x, z } = entry.position;
-      const length = Math.hypot(x, z) || 1;
-      const along = ((camera.position.x - room.position.x) * x + (camera.position.z - room.position.z) * z) / length;
-      return along >= length - 0.35;
-    });
+    const door = currentRoomBuilt.doors.transitionAt(camera.position);
     if (!door || !neighbors.some((nb) => nb.id === door.room)) return;
     pendingRoomId = door.room;
     fromRoomForTransition = room;
+    net.send("move", { x: camera.position.x, y: camera.position.y, z: camera.position.z });
     net.send("chunk_request", { room: door.room });
     return;
   }
@@ -625,6 +642,8 @@ function tick() {
   if (!running) return; // остановлено логаутом — не планируем следующий кадр
 
   const dt = Math.min(clock.getDelta(), 0.05);
+  if (!paused) currentRoomBuilt?.doors.update(dt);
+  if (!disconnected) currentRoomBuilt?.roombas?.update(dt);
 
   if (!paused && !chatOpen) {
     camera.rotation.y = yaw;
@@ -643,17 +662,21 @@ function tick() {
     }
 
     if (currentRoomBuilt?.ready && !pendingRoomId && !disconnected) {
+      const previousPosition = camera.position.clone();
       if (currentRoomBuilt.collision) currentRoomBuilt.collision.move(camera.position, move);
       else camera.position.add(move);
       const resolved = resolveCollision(currentRoomBuilt.room, currentRoomBuilt.neighbors, camera.position.x, camera.position.z);
       camera.position.x = resolved.x;
       camera.position.z = resolved.z;
+      currentRoomBuilt.doors.constrain(previousPosition, camera.position);
       maybeAutoEnterNeighbor();
     }
     updateHud();
 
     // Подсказка [E] Поговорить — показывается, когда рядом NPC и чат закрыт
-    npcHint.style.display = findNearestNpc() ? "block" : "none";
+    const nearDoor = currentRoomBuilt?.ready ? currentRoomBuilt.doors.nearest(camera.position, yaw) : null;
+    npcHint.textContent = nearDoor ? currentRoomBuilt.doors.hint(nearDoor, camera.position) : "[E] Поговорить";
+    npcHint.style.display = nearDoor || findNearestNpc() ? "block" : "none";
 
     const now = performance.now();
     if (now - lastSentAt > 50) {
@@ -680,6 +703,8 @@ function startGame() {
 // Выход: рвёт соединение (без "потеряно"-сообщения), чистит состояние сцены
 // и "запомни меня", возвращает на экран входа.
 function stopGame() {
+  facilityRoom = null;
+  facilityState = null;
   clearMovementKeys();
   running = false;
   paused = false;
