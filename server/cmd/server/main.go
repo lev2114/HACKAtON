@@ -30,7 +30,7 @@ func main() {
 
 	// Пусто = ИИ сразу идёт в FSM-фоллбэк, без похода к Ollama.
 	ollamaURL := os.Getenv("OLLAMA_URL")
-	model := getenv("OLLAMA_MODEL", "qwen2.5:3b")
+	model := getenv("OLLAMA_MODEL", "qwen2.5:7b")
 
 	w, err := world.Load(worldDir)
 	if err != nil {
@@ -51,15 +51,14 @@ func main() {
 	mux.HandleFunc("/ws", srv.WS)
 	mux.Handle("/", http.FileServer(http.Dir(clientDist)))
 
-	log.Printf("Шаролёт слушает на %s (world=%s, ollama=%q)", addr, worldDir, ollamaURL)
+	log.Printf("Шаролёт слушает на %s (world=%s, ollama=%q, model=%q)", addr, worldDir, ollamaURL, model)
 	if err := http.ListenAndServe(addr, withCORS(mux)); err != nil {
 		log.Fatal(err)
 	}
 }
 
 // withCORS lets the Vite dev server (a different port) talk to this API
-// during development. Harmless for the LAN demo since there's no untrusted
-// third party on the network.
+// during client development, while production runs on a single origin.
 func withCORS(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Access-Control-Allow-Origin", "*")
