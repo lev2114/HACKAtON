@@ -2,6 +2,7 @@ import * as THREE from "three";
 import { Net } from "./net.js";
 import { buildRoom, destroyRoom } from "./world.js";
 import { createCosmicSky } from "./sky.js";
+import { createRemotePlayer } from "./players.js";
 
 // Рисуем приглушённый звёздный фон для экрана входа один раз на canvas и
 // подставляем как CSS-фон — не трогает игровую сцену/рендер-луп (тот
@@ -62,7 +63,7 @@ window.addEventListener("resize", () => {
   renderer.setSize(window.innerWidth, window.innerHeight);
 });
 
-const players = new Map(); // playerId -> THREE.Mesh
+const players = new Map(); // playerId -> astronaut Group (network eye position)
 window.__sharolet.players = players; // для отладки/автотестов, см. строку 18
 let currentRoomBuilt = null;
 let roomCleanup = Promise.resolve();
@@ -130,6 +131,7 @@ function updateHud() {
 // ── Открытие / закрытие диалога ──
 
 function openChat(npcId, npcName) {
+  clearMovementKeys();
   chatOpen = true;
   chatNpcId = npcId;
   chatNpcName = npcName;
@@ -158,6 +160,7 @@ function openChat(npcId, npcName) {
 // restoreLock=false во время logout (stopGame) — там мы уходим на экран
 // входа, а не возвращаемся в игру, так что захватывать курсор не нужно.
 function closeChat(restoreLock = true) {
+  clearMovementKeys();
   chatOpen = false;
   chatNpcId = null;
   chatNpcName = null;
@@ -270,7 +273,7 @@ function makeNameTag(name) {
   const texture = new THREE.CanvasTexture(canvas);
   const sprite = new THREE.Sprite(new THREE.SpriteMaterial({ map: texture, depthTest: false }));
   sprite.scale.set(1.6, 0.4, 1);
-  sprite.position.y = 1.3; // над капсулой
+  sprite.position.y = 0.6; // above the astronaut helmet
   sprite.renderOrder = 1; // поверх стен/моделей комнаты
   return sprite;
 }
@@ -279,12 +282,10 @@ function spawnPlayerMesh(id, name, x, y, z) {
   const existing = players.get(id);
   if (existing) {
     existing.position.set(x, y, z);
+    existing.userData.avatar.setTarget(x, y, z);
     return existing;
   }
-  const geo = new THREE.CapsuleGeometry(0.4, 1.2, 4, 8);
-  const mat = new THREE.MeshStandardMaterial({ color: 0x66ccff });
-  const mesh = new THREE.Mesh(geo, mat);
-  mesh.position.set(x, y, z);
+  const mesh = createRemotePlayer(x, y, z);
   mesh.add(makeNameTag(name || "?"));
   scene.add(mesh);
   players.set(id, mesh);
@@ -295,12 +296,11 @@ function removePlayerMesh(id) {
   const mesh = players.get(id);
   if (!mesh) return;
   scene.remove(mesh);
-  mesh.geometry.dispose();
-  mesh.material.dispose();
   for (const child of mesh.children) {
     if (child.material?.map) child.material.map.dispose();
     child.material?.dispose();
   }
+  mesh.userData.avatar.dispose();
   players.delete(id);
 }
 
@@ -375,7 +375,7 @@ net.on("player_joined", (msg) => {
 
 net.on("player_moved", (msg) => {
   const mesh = players.get(msg.playerId);
-  if (mesh) mesh.position.set(msg.x, msg.y, msg.z);
+  if (mesh) mesh.userData.avatar.setTarget(msg.x, msg.y, msg.z);
 });
 
 net.on("player_left", (msg) => {
@@ -412,6 +412,11 @@ window.addEventListener("keydown", (e) => {
 window.addEventListener("keyup", (e) => {
   keys[e.code] = false;
 });
+function clearMovementKeys() {
+  for (const key of Object.keys(keys)) keys[key] = false;
+}
+window.addEventListener("blur", clearMovementKeys);
+document.addEventListener("visibilitychange", () => { if (document.hidden) clearMovementKeys(); });
 
 renderer.domElement.addEventListener("click", () => {
   if (!chatOpen) renderer.domElement.requestPointerLock();
@@ -612,6 +617,7 @@ function maybeAutoEnterNeighbor() {
 }
 
 const speed = 4; // единиц/сек
+const sprintSpeed = 7;
 const clock = new THREE.Clock();
 let lastSentAt = 0;
 
@@ -632,7 +638,8 @@ function tick() {
     if (keys["KeyD"]) move.add(right);
     if (keys["KeyA"]) move.sub(right);
     if (move.lengthSq() > 0) {
-      move.normalize().multiplyScalar(speed * dt);
+      const movementSpeed = keys.ShiftLeft || keys.ShiftRight ? sprintSpeed : speed;
+      move.normalize().multiplyScalar(movementSpeed * dt);
     }
 
     if (currentRoomBuilt?.ready && !pendingRoomId && !disconnected) {
@@ -655,6 +662,7 @@ function tick() {
     }
   }
 
+  for (const player of players.values()) player.userData.avatar.update(dt);
   cosmicSky.render(renderer, scene, camera);
   requestAnimationFrame(tick);
 }
@@ -672,6 +680,7 @@ function startGame() {
 // Выход: рвёт соединение (без "потеряно"-сообщения), чистит состояние сцены
 // и "запомни меня", возвращает на экран входа.
 function stopGame() {
+  clearMovementKeys();
   running = false;
   paused = false;
   net.disconnect();
@@ -777,6 +786,7 @@ window.addEventListener("keydown", (e) => {
   }
   if (!running) return;
   paused = !paused;
+  clearMovementKeys();
   pauseEl.hidden = !paused;
   if (!paused) renderer.domElement.requestPointerLock();
   else if (document.pointerLockElement) document.exitPointerLock();
