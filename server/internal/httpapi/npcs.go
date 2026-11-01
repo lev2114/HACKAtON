@@ -104,7 +104,7 @@ func nearNPC(npc *wanderingNPC, x, y, z float64) bool {
 // Hub's own locked snapshot, never from another socket's mutable store.Player.
 func (s *Server) stepNPCs(now time.Time) {
 	for playerID, conversation := range s.facility.conversations {
-		npc := s.World.NPCs[conversation.npcID]
+		npc, _ := s.World.NPC(conversation.npcID)
 		if !now.Before(conversation.expires) || s.Hub.RoomOf(playerID) != npc.RoomID {
 			delete(s.facility.conversations, playerID)
 		}

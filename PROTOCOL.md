@@ -103,6 +103,7 @@
 | `chunk_request` | `room` (string, id комнаты)       | игрок переходит в другую комнату, запрашивает её данные            |
 | `npc_talk`      | `npcId` (string), `message` (string), `requestId` (number) | игрок обращается к NPC в открытом чате |
 | `npc_conversation` | `npcId` (string), `active` (boolean) | начать/поддержать или завершить разговор |
+| `pong`          | `id, fps, frameMs, memoryMB, drawCalls, triangles, paused, chatOpen, gpu` | ответ на серверный `ping` (метрики для админки) |
 
 ```json
 { "type": "move", "x": 1.2, "y": 1.6, "z": -4.0 }
@@ -115,13 +116,23 @@
 
 | type             | поля                                                  | когда отправляется                              |
 |------------------|--------------------------------------------------------|--------------------------------------------------|
-| `welcome`        | `playerId, name, position{x,y,z}, chunk, players`      | сразу после успешного подключения по WS          |
-| `chunk_data`     | `chunk, players`                                       | ответ на `chunk_request`                         |
+| `welcome`        | `playerId, name, position{x,y,z}, chunk, players, state, settings` | сразу после успешного подключения по WS |
+| `chunk_data`     | `chunk, players, state, position?`                     | ответ на `chunk_request`; с `position` — телепорт из админки |
 | `player_joined`  | `playerId, name, x, y, z`                              | кто-то зашёл в комнату, где ты сейчас находишься |
 | `player_moved`   | `playerId, x, y, z`                                    | кто-то в твоей комнате сдвинулся                 |
 | `player_left`    | `playerId`                                              | кто-то вышел из твоей комнаты (или отключился)   |
 | `npc_response`   | `npcId, npcName, text, requestId`                       | ответ NPC на `npc_talk`                          |
-| `error`          | `code, message`                                         | невалидный запрос (неизвестная комната/NPC)      |
+| `ping`           | `id`                                                    | каждые 2 с; клиент сразу отвечает `pong` с тем же `id` |
+| `settings`       | `settings{walkSpeed, sprintSpeed}`                      | администратор изменил скорости (также внутри `welcome`) |
+| `announcement`   | `text`                                                  | объявление администратора всем игрокам           |
+| `error`          | `code, message, requestId?`                             | невалидный запрос; `npc_out_of_reach` / `npc_busy` — см. "Wandering NPCs", `kicked` — администратор отключил игрока |
+
+**Ping** считает сервер: время от отправки `ping` до получения `pong` с тем
+же `id`. Это RTT уровня приложения — сеть плюс задержка главного потока
+браузера (если у клиента 1 FPS, ping тоже вырастет). FPS/кадр/память/draw
+calls/GPU клиент сообщает сам; сервер их только обрезает до разумных пределов.
+`pong` обрабатывается в цикле чтения сокета, а ответы ИИ — нет (см. ниже),
+поэтому пока NPC «думает», ping не растёт.
 
 `players` — массив `{playerId, name, x, y, z}`, те, кто **уже стоит** в
 комнате на момент входа (себя сервер исключает). Нужен отдельно от
@@ -267,3 +278,37 @@ Restart Go and refresh all clients together for NPC movement support.
 error {code:"session_in_use",message} и закрывается. Клиент ждёт welcome с
 непустой chunk.room перед входом в игру; ошибки до welcome показываются на
 форме входа, таймаут ожидания — 15 секунд.
+
+## Админ-панель (`/admin.html`, REST `/api/admin/*`)
+
+Отдельная страница, не часть 3D-клиента. Доступ — только аккаунтам с ролью
+администратора: колонка `players.is_admin` в SQLite. Роль выдаётся
+переменной окружения сервера `ADMIN_USERS=имя1,имя2` (при старте — уже
+существующим аккаунтам, остальным — в момент регистрации).
+
+`POST /api/admin/login {name, password}` → `{token, name}` (403, если у
+аккаунта нет роли). Это **отдельная сессия панели** в памяти сервера (12 ч):
+игровой токен не меняется, тот же аккаунт может одновременно играть.
+Все остальные запросы — с заголовком `Authorization: Bearer <token>`, без
+него 401. После перезапуска сервера в панель нужно войти заново.
+
+| метод и путь | тело / ответ | что делает |
+|---|---|---|
+| `GET /api/admin/metrics` | `{server, clients[], doors[]}` | панель опрашивает раз в секунду: метрики сервера (аптайм, Go heap, горутины, LLM: запросы/ошибки/средняя задержка/в работе/ответы по шаблону), клиенты с `stats{pingMs, fps, frameMs, memoryMB, drawCalls, triangles, paused, chatOpen, gpu, droppedMessages}`, двери |
+| `GET /api/admin/config` | `{settings, defaults, npcs[], rooms[], factBanks[]}` | всё редактируемое; у NPC — текущие поля, `profile` (правки), `defaults` (встроенные промпт/приветствие/оффтоп), `base` (из npcs.json) |
+| `PUT /api/admin/settings` | `{walkSpeed, sprintSpeed, llmEnabled, model, cleanersEnabled, cleanerSpeed}` | глобальные настройки, сразу рассылает `settings` игрокам |
+| `DELETE /api/admin/settings` | → настройки | сброс к исходным |
+| `POST /api/admin/doors` | `{a, b, open}` | открыть/закрыть дверь между комнатами без проверки расстояния |
+| `POST /api/admin/announce` | `{text}` → `{recipients}` | объявление всем (`announcement`), до 300 символов |
+| `POST /api/admin/players/{id}/teleport` | `{room}` | переносит игрока в точку появления комнаты (`chunk_data` с `position`) |
+| `POST /api/admin/players/{id}/kick` | — | `error kicked`, затем сокет закрывается |
+| `PUT /api/admin/npcs/{id}` | `{name, title, personality, profile{systemPrompt, greeting, offtopic, mode, temperature?, maxTokens}}` | поведение персонажа; пустые строки = встроенный текст. `mode`: `llm` / `fsm` (только шаблоны) / `silent` |
+| `DELETE /api/admin/npcs/{id}` | — | вернуть персонажа к исходному |
+| `GET /api/admin/npcs/{id}/memory` | `[{playerId, name, toldFacts, lines[{role, content, at}]}]` | диалоги NPC с каждым игроком (последние 40 реплик, в памяти) |
+| `DELETE /api/admin/npcs/{id}/memory?player=` | — | забыть одного игрока или всех (контекст LLM, состояние FSM, рассказанные факты) |
+| `GET/PUT/DELETE /api/admin/facts/{bank}` | `[{id, topic, difficulty, text}]` | банк фактов целиком; у новых фактов пустой `id` — сервер выдаст сам; DELETE — вернуть исходные |
+
+Правки сохраняются в SQLite (таблица `admin_config`, `kind` = `settings` /
+`npc` / `facts`) **поверх** `world-data/*.json` — сами JSON-файлы в git не
+меняются, поэтому у тиммейтов при `git pull` ничего не конфликтует. При
+старте сервер применяет сохранённые правки (`LoadAdminOverrides`).

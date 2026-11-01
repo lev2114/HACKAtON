@@ -34,8 +34,56 @@ type chatMessage struct {
 }
 
 type ollamaOptions struct {
-	Temperature   float64 `json:"temperature,omitempty"`
-	RepeatPenalty float64 `json:"repeat_penalty,omitempty"`
+	Temperature   *float64 `json:"temperature,omitempty"` // pointer: 0 is a valid admin choice
+	RepeatPenalty float64  `json:"repeat_penalty,omitempty"`
+	NumPredict    int      `json:"num_predict,omitempty"`
+}
+
+// defaultTemperature is used unless the admin panel sets one per NPC.
+const defaultTemperature = 0.6
+
+// Mode is how an NPC answers, set per character from the admin panel.
+type Mode string
+
+const (
+	ModeLLM    Mode = "llm"    // Ollama if available, FSM template otherwise
+	ModeFSM    Mode = "fsm"    // templates only, never calls Ollama
+	ModeSilent Mode = "silent" // doesn't talk at all
+)
+
+// Profile overrides an NPC's built-in character. Empty strings / zero values
+// fall back to the built-ins. SystemPrompt replaces only the character part
+// of the prompt: the station directory, referral and style rules are still
+// appended by askOllamaChat.
+type Profile struct {
+	SystemPrompt string   `json:"systemPrompt"`
+	Greeting     string   `json:"greeting"`
+	Offtopic     string   `json:"offtopic"`
+	Mode         Mode     `json:"mode"`
+	Temperature  *float64 `json:"temperature,omitempty"`
+	MaxTokens    int      `json:"maxTokens,omitempty"`
+}
+
+// TranscriptLine is one line of the admin-visible dialogue log. It is longer
+// than the LLM context and is never sent to the model.
+type TranscriptLine struct {
+	Role    string    `json:"role"`
+	Content string    `json:"content"`
+	NPCID   string    `json:"npcId"`
+	At      time.Time `json:"at"`
+}
+
+const transcriptLimit = 40
+
+// Stats summarize LLM usage for the admin panel.
+type Stats struct {
+	Requests      int64   `json:"requests"`
+	Failures      int64   `json:"failures"`
+	Fallbacks     int64   `json:"fallbacks"`
+	InFlight      int     `json:"inFlight"`
+	AvgLatencyMs  float64 `json:"avgLatencyMs"`
+	LastLatencyMs float64 `json:"lastLatencyMs"`
+	LastError     string  `json:"lastError"`
 }
 
 type ollamaChatRequest struct {
@@ -195,6 +243,18 @@ type Responder struct {
 
 	// Visited NPCs per player: playerID -> map[npcID]bool
 	visitedNPCs map[string]map[string]bool
+
+	// Admin-visible dialogue log, same (player, logical character) keys as history.
+	transcripts map[string][]TranscriptLine
+
+	// Admin-editable configuration (model is read through LLM()).
+	cfgMu      sync.RWMutex
+	llmEnabled bool
+	profiles   map[string]Profile
+
+	statsMu      sync.Mutex
+	stats        Stats
+	totalLatency float64
 }
 
 // New builds a Responder.
@@ -202,11 +262,14 @@ func New(ollamaURL, model string) *Responder {
 	r := &Responder{
 		ollamaURL:   ollamaURL,
 		model:       model,
+		llmEnabled:  true,
 		client:      &http.Client{Timeout: 35 * time.Second},
 		sem:         make(chan struct{}, 2), // at most 2 concurrent Ollama requests
 		states:      make(map[string]State),
 		history:     make(map[string][]chatMessage),
 		visitedNPCs: make(map[string]map[string]bool),
+		transcripts: make(map[string][]TranscriptLine),
+		profiles:    make(map[string]Profile),
 	}
 
 	// Warm up model in background so the first in-game query doesn't stall on load
@@ -217,10 +280,198 @@ func New(ollamaURL, model string) *Responder {
 	return r
 }
 
+// OllamaURL is fixed at startup (OLLAMA_URL); empty means no LLM at all.
+func (r *Responder) OllamaURL() string { return r.ollamaURL }
+
+func (r *Responder) LLM() (enabled bool, model string) {
+	r.cfgMu.RLock()
+	defer r.cfgMu.RUnlock()
+	return r.llmEnabled, r.model
+}
+
+// SetLLM switches the LLM on/off for every NPC and changes the model. A new
+// model is warmed up in the background so the next player doesn't wait.
+func (r *Responder) SetLLM(enabled bool, model string) {
+	r.cfgMu.Lock()
+	changed := model != "" && model != r.model
+	r.llmEnabled = enabled
+	if model != "" {
+		r.model = model
+	}
+	r.cfgMu.Unlock()
+	if changed && enabled && r.ollamaURL != "" {
+		go r.warmup()
+	}
+}
+
+// Profile returns the admin override for an NPC (zero value if none).
+func (r *Responder) Profile(npcID string) Profile {
+	r.cfgMu.RLock()
+	defer r.cfgMu.RUnlock()
+	return r.profiles[npcID]
+}
+
+func (r *Responder) SetProfile(npcID string, p Profile) {
+	r.cfgMu.Lock()
+	r.profiles[npcID] = p
+	r.cfgMu.Unlock()
+}
+
+func (r *Responder) ClearProfile(npcID string) {
+	r.cfgMu.Lock()
+	delete(r.profiles, npcID)
+	r.cfgMu.Unlock()
+}
+
+// Defaults are the built-in texts an override replaces, so the admin panel
+// can show what the character says without one.
+func Defaults(npc world.NPC) Profile {
+	t := defaultTemperature
+	p := Profile{
+		SystemPrompt: npcSystemInstructions[npc.ID],
+		Greeting:     greetings[npc.ID],
+		Offtopic:     npcOfftopicFallbacks[npc.ID],
+		Mode:         ModeLLM,
+		Temperature:  &t,
+	}
+	if p.SystemPrompt == "" {
+		p.SystemPrompt = fmt.Sprintf("Ты — %s, %s на космической станции «Шаролёт». Твой характер: %s. Отвечай кратко, по делу и строго на темы космоса на чистом русском языке без китайских символов.", npc.Name, npc.Title, npc.Personality)
+	}
+	if p.Greeting == "" {
+		p.Greeting = fmt.Sprintf("Привет! Я %s, %s. Спрашивай о чём хочешь.", npc.Name, npc.Title)
+	}
+	if p.Offtopic == "" {
+		p.Offtopic = fmt.Sprintf("Я — %s, %s. Давай лучше поговорим о космосе.", npc.Name, npc.Title)
+	}
+	return p
+}
+
+// effective merges an override over the built-ins.
+func (r *Responder) effective(npc world.NPC) Profile {
+	p := Defaults(npc)
+	o := r.Profile(npc.ID)
+	if o.SystemPrompt != "" {
+		p.SystemPrompt = o.SystemPrompt
+	}
+	if o.Greeting != "" {
+		p.Greeting = o.Greeting
+	}
+	if o.Offtopic != "" {
+		p.Offtopic = o.Offtopic
+	}
+	if o.Mode != "" {
+		p.Mode = o.Mode
+	}
+	if o.Temperature != nil {
+		p.Temperature = o.Temperature
+	}
+	p.MaxTokens = o.MaxTokens
+	return p
+}
+
+func (r *Responder) Stats() Stats {
+	r.statsMu.Lock()
+	defer r.statsMu.Unlock()
+	return r.stats
+}
+
+func (r *Responder) recordLLM(start time.Time, err error) {
+	ms := float64(time.Since(start).Microseconds()) / 1000
+	r.statsMu.Lock()
+	defer r.statsMu.Unlock()
+	r.stats.InFlight--
+	r.stats.Requests++
+	if err != nil {
+		r.stats.Failures++
+		r.stats.LastError = err.Error()
+		return
+	}
+	r.totalLatency += ms
+	r.stats.LastLatencyMs = ms
+	r.stats.AvgLatencyMs = r.totalLatency / float64(r.stats.Requests-r.stats.Failures)
+}
+
+// Conversation is one player's dialogue log with an NPC.
+type Conversation struct {
+	PlayerID string           `json:"playerId"`
+	Lines    []TranscriptLine `json:"lines"`
+}
+
+// SharedMemoryWith lists the other NPC ids that share memory with npcID
+// (the same character in two rooms).
+func SharedMemoryWith(npcID string) []string {
+	var out []string
+	for id := range stationNPCs {
+		if id != npcID && logicalCharacterID(id) == logicalCharacterID(npcID) {
+			out = append(out, id)
+		}
+	}
+	return out
+}
+
+// Conversations returns every player's dialogue log with npcID's character
+// (shared with its other-room twin, see logicalCharacterID).
+func (r *Responder) Conversations(npcID string) []Conversation {
+	r.historyMu.RLock()
+	defer r.historyMu.RUnlock()
+	logical := logicalCharacterID(npcID)
+	var out []Conversation
+	for key, lines := range r.transcripts {
+		playerID, id, _ := strings.Cut(key, ":")
+		if id != logical {
+			continue
+		}
+		out = append(out, Conversation{PlayerID: playerID, Lines: append([]TranscriptLine(nil), lines...)})
+	}
+	return out
+}
+
+// ResetMemory makes an NPC's character forget one player (or everyone,
+// playerID == ""): LLM context, admin transcript, FSM state and the
+// "already talked to" mark other NPCs refer to. Told-facts memory lives in
+// SQLite and is reset separately by the caller.
+func (r *Responder) ResetMemory(npcID, playerID string) {
+	logical := logicalCharacterID(npcID)
+	match := func(key string) bool {
+		p, id, _ := strings.Cut(key, ":")
+		return id == logical && (playerID == "" || p == playerID)
+	}
+	r.historyMu.Lock()
+	for k := range r.history {
+		if match(k) {
+			delete(r.history, k)
+		}
+	}
+	for k := range r.transcripts {
+		if match(k) {
+			delete(r.transcripts, k)
+		}
+	}
+	for p, visited := range r.visitedNPCs {
+		if playerID != "" && p != playerID {
+			continue
+		}
+		for id := range visited {
+			if logicalCharacterID(id) == logical {
+				delete(visited, id)
+			}
+		}
+	}
+	r.historyMu.Unlock()
+	r.mu.Lock()
+	for k := range r.states {
+		if match(k) {
+			delete(r.states, k)
+		}
+	}
+	r.mu.Unlock()
+}
+
 func (r *Responder) warmup() {
-	log.Printf("ai: прогрев модели Ollama (%s)...", r.model)
+	_, model := r.LLM()
+	log.Printf("ai: прогрев модели Ollama (%s)...", model)
 	body, _ := json.Marshal(ollamaChatRequest{
-		Model: r.model,
+		Model: model,
 		Messages: []chatMessage{
 			{Role: "user", Content: "Привет"},
 		},
@@ -238,7 +489,7 @@ func (r *Responder) warmup() {
 		return
 	}
 	defer resp.Body.Close()
-	log.Printf("ai: модель Ollama (%s) прогрета и загружена в память!", r.model)
+	log.Printf("ai: модель Ollama (%s) прогрета и загружена в память!", model)
 }
 
 func stateKey(playerID, npcID string) string {
@@ -285,6 +536,19 @@ func (r *Responder) appendHistory(playerID, npcID, userMsg, assistantMsg string)
 		h = h[len(h)-8:]
 	}
 	r.history[key] = h
+
+	t := r.transcripts[key]
+	now := time.Now()
+	if userMsg != "" {
+		t = append(t, TranscriptLine{Role: "user", Content: userMsg, NPCID: npcID, At: now})
+	}
+	if assistantMsg != "" {
+		t = append(t, TranscriptLine{Role: "assistant", Content: assistantMsg, NPCID: npcID, At: now})
+	}
+	if len(t) > transcriptLimit {
+		t = t[len(t)-transcriptLimit:]
+	}
+	r.transcripts[key] = t
 }
 
 func (r *Responder) markVisited(playerID, npcID string) {
@@ -649,6 +913,13 @@ func cleanDialogueResponse(text string) string {
 
 // Reply returns the line an NPC says.
 func (r *Responder) Reply(ctx context.Context, npc world.NPC, fact *world.Fact, playerMessage string, repeat bool, availableTopics []string, playerID string) string {
+	profile := r.effective(npc)
+	if profile.Mode == ModeSilent {
+		text := fmt.Sprintf("%s сейчас занят и не отвечает.", npc.Name)
+		r.appendHistory(playerID, npc.ID, playerMessage, text)
+		return text
+	}
+
 	r.markVisited(playerID, npc.ID)
 
 	state := r.getState(playerID, npc.ID)
@@ -658,12 +929,8 @@ func (r *Responder) Reply(ctx context.Context, npc world.NPC, fact *world.Fact, 
 		r.setState(playerID, npc.ID, Telling)
 		// Если это просто открытие диалога ("Привет!"), сразу отдаём приветствие
 		if msgLower == "привет!" || msgLower == "привет" || msgLower == "" {
-			greeting := fmt.Sprintf("Привет! Я %s, %s. Спрашивай о чём хочешь.", npc.Name, npc.Title)
-			if g, ok := greetings[npc.ID]; ok {
-				greeting = g
-			}
-			r.appendHistory(playerID, npc.ID, playerMessage, greeting)
-			return greeting
+			r.appendHistory(playerID, npc.ID, playerMessage, profile.Greeting)
+			return profile.Greeting
 		}
 	}
 
@@ -678,10 +945,11 @@ func (r *Responder) Reply(ctx context.Context, npc world.NPC, fact *world.Fact, 
 	}
 
 	// Try Ollama /api/chat first if available
-	if r.ollamaURL != "" {
+	llmEnabled, model := r.LLM()
+	if r.ollamaURL != "" && llmEnabled && profile.Mode == ModeLLM {
 		hasFact := fact != nil
 		log.Printf("ai: запрос к Ollama для %s (hasFact: %v, вопрос: %q)", npc.Name, hasFact, playerMessage)
-		text, err := r.askOllamaChat(ctx, npc, fact, playerMessage, repeat, availableTopics, playerID)
+		text, err := r.askOllamaChat(ctx, npc, profile, model, fact, playerMessage, repeat, availableTopics, playerID)
 		if err != nil {
 			log.Printf("ai: ollama error for %s→%s, falling back to FSM: %v", playerID, npc.ID, err)
 		} else {
@@ -695,11 +963,14 @@ func (r *Responder) Reply(ctx context.Context, npc world.NPC, fact *world.Fact, 
 	}
 
 	// FSM fallback:
+	r.statsMu.Lock()
+	r.stats.Fallbacks++
+	r.statsMu.Unlock()
 	var fallbackText string
 	if fact != nil {
 		fallbackText = fsmLine(npc, fact, repeat, availableTopics)
 	} else {
-		fallbackText = r.fsmFallbackLine(npc, playerMessage, playerID)
+		fallbackText = r.fsmFallbackLine(npc, profile, playerMessage, playerID)
 	}
 
 	r.appendHistory(playerID, npc.ID, playerMessage, fallbackText)
@@ -707,7 +978,7 @@ func (r *Responder) Reply(ctx context.Context, npc world.NPC, fact *world.Fact, 
 }
 
 // fsmFallbackLine generates in-character referral or off-topic fallback when LLM is unavailable.
-func (r *Responder) fsmFallbackLine(npc world.NPC, playerMessage, playerID string) string {
+func (r *Responder) fsmFallbackLine(npc world.NPC, profile Profile, playerMessage, playerID string) string {
 	msgLower := strings.ToLower(playerMessage)
 
 	// Специальная проверка на вопрос "чем занимаешься"
@@ -773,10 +1044,8 @@ func (r *Responder) fsmFallbackLine(npc world.NPC, playerMessage, playerID strin
 		}
 	}
 
-	if fallback, ok := npcOfftopicFallbacks[npc.ID]; ok {
-		return fallback
-	}
-	return fmt.Sprintf("Я — %s, %s. Давай лучше поговорим о космосе.", npc.Name, npc.Title)
+	// Built-in line, or the admin's override (see Defaults/effective).
+	return profile.Offtopic
 }
 
 // fsmLine generates a templated NPC response without LLM when a fact is present.
@@ -861,7 +1130,7 @@ func topicDisplayName(topic string) string {
 // Ollama /api/chat integration with multi-turn conversation memory
 // ---------------------------------------------------------------------------
 
-func (r *Responder) askOllamaChat(ctx context.Context, npc world.NPC, fact *world.Fact, playerMessage string, repeat bool, availableTopics []string, playerID string) (string, error) {
+func (r *Responder) askOllamaChat(ctx context.Context, npc world.NPC, profile Profile, model string, fact *world.Fact, playerMessage string, repeat bool, availableTopics []string, playerID string) (text string, err error) {
 	select {
 	case r.sem <- struct{}{}:
 		defer func() { <-r.sem }()
@@ -869,13 +1138,18 @@ func (r *Responder) askOllamaChat(ctx context.Context, npc world.NPC, fact *worl
 		return "", ctx.Err()
 	}
 
+	r.statsMu.Lock()
+	r.stats.InFlight++
+	r.statsMu.Unlock()
+	start := time.Now()
+	defer func() { r.recordLLM(start, err) }()
+
 	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
 
-	basePrompt, ok := npcSystemInstructions[npc.ID]
-	if !ok {
-		basePrompt = fmt.Sprintf("Ты — %s, %s на космической станции «Шаролёт». Твой характер: %s. Отвечай кратко, по делу и строго на темы космоса на чистом русском языке без китайских символов.", npc.Name, npc.Title, npc.Personality)
-	}
+	// Built-in npcSystemInstructions (or the generic prompt) unless the admin
+	// panel overrode the character — see Defaults/effective.
+	basePrompt := profile.SystemPrompt
 
 	var sb strings.Builder
 	sb.WriteString(basePrompt)
@@ -960,12 +1234,17 @@ func (r *Responder) askOllamaChat(ctx context.Context, npc world.NPC, fact *worl
 	// Current turn
 	messages = append(messages, chatMessage{Role: "user", Content: playerMessage})
 
+	temperature := defaultTemperature
+	if profile.Temperature != nil {
+		temperature = *profile.Temperature
+	}
 	body, err := json.Marshal(ollamaChatRequest{
-		Model:    r.model,
+		Model:    model,
 		Messages: messages,
 		Options: &ollamaOptions{
-			Temperature:   0.6,
+			Temperature:   &temperature,
 			RepeatPenalty: 1.15,
+			NumPredict:    profile.MaxTokens,
 		},
 		Stream: false,
 	})
@@ -994,7 +1273,7 @@ func (r *Responder) askOllamaChat(ctx context.Context, npc world.NPC, fact *worl
 		return "", err
 	}
 
-	text := strings.TrimSpace(out.Message.Content)
+	text = strings.TrimSpace(out.Message.Content)
 	if text == "" {
 		return "", fmt.Errorf("ollama returned empty response")
 	}

@@ -46,6 +46,12 @@
         position: fixed; top: 12px; left: 12px; color: #cfd8ff; font-size: 14px;
         z-index: 5; pointer-events: none; text-shadow: 0 1px 2px #000;
       }
+      #announcement:not([hidden]) {
+        position: fixed; top: 18px; left: 50%; transform: translateX(-50%);
+        max-width: min(560px, 90vw); padding: 10px 18px; border-radius: 10px;
+        background: rgba(74, 124, 255, 0.92); color: #fff; font-size: 15px; text-align: center;
+        z-index: 25; pointer-events: none; box-shadow: 0 4px 24px rgba(0, 0, 0, 0.5);
+      }
       #controls {
         position: fixed; bottom: 10px; right: 12px; color: #8a93b8; font-size: 12px;
         z-index: 5; pointer-events: none; text-align: right; text-shadow: 0 1px 2px #000;
@@ -201,6 +207,7 @@
       </div>
     </div>
     <div id="hud"></div>
+    <div id="announcement" hidden></div>
     <div id="controls">
       WASD — двигаться · Shift — бежать · мышь (ЛКМ, затем двигать) — осмотреться<br />
       E — открыть/закрыть дверь или поговорить · переход через открытую дверь

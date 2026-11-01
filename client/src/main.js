@@ -46,7 +46,18 @@ const camera = new THREE.PerspectiveCamera(70, window.innerWidth / window.innerH
 camera.position.set(0, 1.6, 5);
 camera.rotation.order = "YXZ";
 
-const renderer = new THREE.WebGLRenderer({ antialias: true });
+// На ноутбуках с двумя видеокартами браузер по умолчанию берёт встроенную:
+// на Intel UHD вестибюль даёт ~8 FPS, на GTX 1660 Ti — ~200. Это только
+// подсказка браузеру (Windows может её игнорировать) — надёжно помогает
+// "Высокая производительность" для браузера в настройках графики Windows.
+const renderer = new THREE.WebGLRenderer({ antialias: true, powerPreference: "high-performance" });
+
+// Имя видеокарты для админки: сразу видно, кто играет на встроенной.
+const gpuName = (() => {
+  const gl = renderer.getContext();
+  const ext = gl.getExtension("WEBGL_debug_renderer_info");
+  return String(ext ? gl.getParameter(ext.UNMASKED_RENDERER_WEBGL) : gl.getParameter(gl.RENDERER)).slice(0, 160);
+})();
 renderer.setSize(window.innerWidth, window.innerHeight);
 document.body.appendChild(renderer.domElement);
 
@@ -434,14 +445,43 @@ net.on("welcome", (msg) => {
   myName = msg.name;
   clearUserDialogueHistories();
   disconnected = false;
+  applySettings(msg.settings);
   enterChunk(msg.chunk, separateSpawn(msg.position, msg.chunk.room, msg.players), msg.players, msg.state);
 });
 
 net.on("chunk_data", (msg) => {
   pendingRoomId = null;
-  const entry = computeEntryPoint(msg.chunk.room, fromRoomForTransition);
+  // position приходит, когда комнату сменил сервер (телепорт из админки),
+  // а не игрок прошёл через дверь — тогда точку входа считать не от чего.
+  const entry = msg.position ?? computeEntryPoint(msg.chunk.room, fromRoomForTransition);
   fromRoomForTransition = null;
   enterChunk(msg.chunk, entry, msg.players, msg.state);
+});
+
+net.on("settings", (msg) => applySettings(msg.settings));
+
+net.on("ping", (msg) => {
+  const info = renderer.info.render;
+  net.send("pong", {
+    id: msg.id,
+    fps: Math.round(frameStats.fps * 10) / 10,
+    frameMs: Math.round(frameStats.frameMs * 100) / 100,
+    memoryMB: performance.memory ? Math.round(performance.memory.usedJSHeapSize / 1048576) : 0,
+    drawCalls: info.calls,
+    triangles: info.triangles,
+    gpu: gpuName,
+    paused,
+    chatOpen,
+  });
+});
+
+const announcementEl = document.getElementById("announcement");
+let announcementTimer = null;
+net.on("announcement", (msg) => {
+  announcementEl.textContent = msg.text;
+  announcementEl.hidden = false;
+  clearTimeout(announcementTimer);
+  announcementTimer = setTimeout(() => (announcementEl.hidden = true), 8000);
 });
 
 net.on("player_joined", (msg) => {
@@ -471,6 +511,11 @@ net.on("npc_response", (msg) => {
 });
 
 net.on("error", (msg) => {
+  if (msg.code === "kicked") {
+    stopGame();
+    loginError.textContent = msg.message;
+    return;
+  }
   if (msg.code === "npc_out_of_reach") {
     if (msg.requestId !== undefined && msg.requestId !== chatRequestId) return;
     if (chatOpen) closeChat(false);
@@ -513,8 +558,13 @@ renderer.domElement.addEventListener("click", () => {
 
 let yaw = 0;
 let pitch = 0;
+// Chrome на Windows с захваченным курсором изредка присылает одно событие
+// со сдвигом в сотни пикселей — камера "телепортируется". Реальная мышь
+// за одно событие (~1–8 мс) так далеко не уезжает, такие выбросы пропускаем.
+const MAX_MOUSE_DELTA = 300;
 document.addEventListener("mousemove", (e) => {
   if (document.pointerLockElement !== renderer.domElement) return;
+  if (Math.abs(e.movementX) > MAX_MOUSE_DELTA || Math.abs(e.movementY) > MAX_MOUSE_DELTA) return;
   yaw -= e.movementX * 0.0025;
   pitch -= e.movementY * 0.0025;
   pitch = Math.max(-1.2, Math.min(1.2, pitch));
@@ -710,14 +760,37 @@ function maybeAutoEnterNeighbor() {
   net.send("chunk_request", { room: nb.id });
 }
 
-const speed = 4; // единиц/сек
-const sprintSpeed = 7;
+// Скорости приходят с сервера (settings в welcome и отдельным сообщением,
+// когда администратор их меняет); здесь — значения до первого ответа.
+let speed = 4; // единиц/сек
+let sprintSpeed = 7;
 const clock = new THREE.Clock();
 let lastSentAt = 0;
+
+// FPS за последнюю секунду — сервер забирает их в ответе на свой ping.
+const frameStats = { frames: 0, windowStart: performance.now(), fps: 0, frameMs: 0 };
+function countFrame() {
+  const now = performance.now();
+  frameStats.frames++;
+  const elapsed = now - frameStats.windowStart;
+  if (elapsed >= 1000) {
+    frameStats.fps = (frameStats.frames * 1000) / elapsed;
+    frameStats.frameMs = elapsed / frameStats.frames;
+    frameStats.frames = 0;
+    frameStats.windowStart = now;
+  }
+}
+
+function applySettings(settings) {
+  if (!settings) return;
+  if (settings.walkSpeed > 0) speed = settings.walkSpeed;
+  if (settings.sprintSpeed > 0) sprintSpeed = settings.sprintSpeed;
+}
 
 function tick() {
   if (!running) return; // остановлено логаутом — не планируем следующий кадр
 
+  countFrame();
   const dt = Math.min(clock.getDelta(), 0.05);
   if (!paused) currentRoomBuilt?.doors.update(dt);
   if (!disconnected) currentRoomBuilt?.roombas?.update(dt);

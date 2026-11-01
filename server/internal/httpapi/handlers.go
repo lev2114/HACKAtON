@@ -15,6 +15,7 @@ import (
 	"net"
 	"net/http"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 	"unicode"
@@ -44,15 +45,31 @@ type Server struct {
 	// Hackathon-scale: in-memory, per-process, no cleanup of old keys.
 	loginLimiter    *ratelimit.Limiter
 	registerLimiter *ratelimit.Limiter
+	adminLimiter    *ratelimit.Limiter
+
+	settingsMu sync.RWMutex
+	settings   Settings
+
+	adminMu       sync.Mutex
+	adminSessions map[string]adminSession
+
+	startedAt time.Time
+	baseModel string // OLLAMA_MODEL at startup — "reset settings" target
 }
 
 func New(w *world.World, st *store.Store, h *hub.Hub, responder *ai.Responder) *Server {
+	_, model := responder.LLM()
 	return &Server{
-		World:    w,
-		Store:    st,
-		Hub:      h,
-		AI:       responder,
-		facility: newFacility(w),
+		World:         w,
+		Store:         st,
+		Hub:           h,
+		AI:            responder,
+		facility:      newFacility(w),
+		settings:      defaultSettings(model),
+		adminSessions: map[string]adminSession{},
+		adminLimiter:  ratelimit.New(8, 30*time.Second),
+		startedAt:     time.Now(),
+		baseModel:     model,
 		upgrader: websocket.Upgrader{
 			ReadBufferSize:  1024,
 			WriteBufferSize: 1024,
@@ -198,6 +215,11 @@ func (s *Server) Register(w http.ResponseWriter, r *http.Request) {
 		writeJSONError(w, http.StatusInternalServerError, "внутренняя ошибка сервера")
 		return
 	}
+	if AdminNames[player.Name] {
+		if err := s.Store.SetAdmin(player.Name, true); err != nil {
+			log.Printf("register: grant admin %q: %v", player.Name, err)
+		}
+	}
 
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(authResponse{PlayerID: player.ID, Token: player.Token, Room: player.Room})
@@ -295,9 +317,12 @@ func (s *Server) WS(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := context.WithCancel(r.Context())
 	defer cancel()
 	var replyBusy atomic.Bool
+	stopPing := make(chan struct{})
+	go s.pingLoop(client, stopPing)
 
 	defer func() {
 		cancel()
+		close(stopPing)
 		room := s.Hub.RoomOf(player.ID) // перед Unregister — потом хаб его уже не помнит
 		if _, valid := s.World.Rooms[room]; !valid {
 			room = player.Room
@@ -326,6 +351,7 @@ func (s *Server) WS(w http.ResponseWriter, r *http.Request) {
 		"position": world.Vec3{X: player.X, Y: player.Y, Z: player.Z},
 		"chunk":    chunk,
 		"state":    s.facilitySnapshot(player.Room),
+		"settings": s.clientSettings(),
 		// Кто уже стоит в этой комнате — без этого видно только тех, кто
 		// присоединился/подвинулся ПОСЛЕ тебя, а не тех, кто был раньше.
 		"players": s.Hub.PlayersInRoom(player.Room, player.ID),
@@ -357,6 +383,63 @@ type incoming struct {
 	Z         float64 `json:"z"`
 	NpcID     string  `json:"npcId"`
 	Message   string  `json:"message"`
+
+	// pong
+	ID        uint64  `json:"id"`
+	FPS       float64 `json:"fps"`
+	FrameMs   float64 `json:"frameMs"`
+	MemoryMB  float64 `json:"memoryMB"`
+	DrawCalls int     `json:"drawCalls"`
+	Triangles int     `json:"triangles"`
+	Paused    bool    `json:"paused"`
+	ChatOpen  bool    `json:"chatOpen"`
+	GPU       string  `json:"gpu"`
+}
+
+const pingInterval = 2 * time.Second
+
+// pingLoop measures RTT per connection: the server timestamps each ping and
+// the client answers with a pong carrying the same id plus its own FPS etc.
+func (s *Server) pingLoop(client *hub.Client, stop <-chan struct{}) {
+	ticker := time.NewTicker(pingInterval)
+	defer ticker.Stop()
+	var id uint64
+	for {
+		id++
+		client.SentPing(id)
+		client.Send(map[string]any{"type": "ping", "id": id})
+		select {
+		case <-stop:
+			return
+		case <-ticker.C:
+		}
+	}
+}
+
+func truncate(s string, n int) string {
+	if r := []rune(s); len(r) > n {
+		return string(r[:n])
+	}
+	return s
+}
+
+func (s *Server) onPong(client *hub.Client, msg incoming) {
+	clamp := func(v, max float64) float64 {
+		if math.IsNaN(v) || v < 0 {
+			return 0
+		}
+		return math.Min(v, max)
+	}
+	client.ReceivedPong(msg.ID, hub.ClientStats{
+		FPS:       clamp(msg.FPS, 1000),
+		FrameMs:   clamp(msg.FrameMs, 10000),
+		MemoryMB:  clamp(msg.MemoryMB, 1e6),
+		DrawCalls: max(msg.DrawCalls, 0),
+		Triangles: max(msg.Triangles, 0),
+		Paused:    msg.Paused,
+		ChatOpen:  msg.ChatOpen,
+		GPU:       truncate(msg.GPU, 160),
+	})
 }
 
 func (s *Server) handleMessage(ctx context.Context, replyBusy *atomic.Bool, client *hub.Client, player *store.Player, raw []byte) {
@@ -389,6 +472,8 @@ func (s *Server) handleMessage(ctx context.Context, replyBusy *atomic.Bool, clie
 			defer replyBusy.Store(false)
 			s.onNpcTalk(ctx, client, &playerCopy, msg)
 		}()
+	case "pong":
+		s.onPong(client, msg)
 	default:
 		log.Printf("ws: unknown message type %q from %s", msg.Type, player.ID)
 	}
@@ -468,7 +553,7 @@ func (s *Server) onChunkRequest(client *hub.Client, player *store.Player, msg in
 }
 
 func (s *Server) onNpcTalk(ctx context.Context, client *hub.Client, player *store.Player, msg incoming) {
-	npc, ok := s.World.NPCs[msg.NpcID]
+	npc, ok := s.World.NPC(msg.NpcID)
 	if !ok {
 		s.Hub.SendToClient(client, map[string]any{"type": "error", "code": "unknown_npc", "message": "нет такого NPC: " + msg.NpcID, "requestId": msg.RequestID})
 		return

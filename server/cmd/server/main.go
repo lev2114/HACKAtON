@@ -8,6 +8,7 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"strings"
 
 	"server/internal/ai"
 	"server/internal/httpapi"
@@ -44,15 +45,30 @@ func main() {
 		log.Fatalf("не удалось открыть БД %s: %v", dbPath, err)
 	}
 
+	// ADMIN_USERS=name1,name2 — эти аккаунты получают доступ к /admin.
+	for _, name := range strings.Split(os.Getenv("ADMIN_USERS"), ",") {
+		if name = strings.TrimSpace(name); name != "" {
+			httpapi.AdminNames[name] = true
+		}
+	}
+
 	h := hub.New()
 	responder := ai.New(ollamaURL, model)
 	srv := httpapi.New(w, st, h, responder)
+	srv.GrantConfiguredAdmins()
+	if err := srv.LoadAdminOverrides(); err != nil {
+		log.Fatalf("не удалось применить правки из админ-панели: %v", err)
+	}
 	go srv.RunFacility(context.Background())
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("/api/register", srv.Register)
 	mux.HandleFunc("/api/login", srv.Login)
 	mux.HandleFunc("/ws", srv.WS)
+	srv.RegisterAdminRoutes(mux)
+	mux.HandleFunc("GET /admin", func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, "/admin.html", http.StatusFound)
+	})
 	mux.Handle("/", http.FileServer(http.Dir(clientDist)))
 
 	certFile, keyFile, err := ensureTLSCert(certDir)
