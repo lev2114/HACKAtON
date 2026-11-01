@@ -383,6 +383,7 @@ type incoming struct {
 	Z         float64 `json:"z"`
 	NpcID     string  `json:"npcId"`
 	Message   string  `json:"message"`
+	Text      string  `json:"text"`
 
 	// pong
 	ID        uint64  `json:"id"`
@@ -450,6 +451,8 @@ func (s *Server) handleMessage(ctx context.Context, replyBusy *atomic.Bool, clie
 	}
 
 	switch msg.Type {
+	case "chat":
+		s.onPlayerChat(client, player, msg)
 	case "npc_conversation":
 		s.onNpcConversation(client, player, msg)
 	case "door_set":
@@ -582,4 +585,34 @@ func (s *Server) onNpcTalk(ctx context.Context, client *hub.Client, player *stor
 	s.Hub.SendToClient(client, map[string]any{
 		"type": "npc_response", "npcId": npc.ID, "npcName": npc.Name, "text": text, "requestId": msg.RequestID,
 	})
+}
+
+func (s *Server) onPlayerChat(client *hub.Client, player *store.Player, msg incoming) {
+	text := strings.TrimSpace(msg.Text)
+	if text == "" {
+		text = strings.TrimSpace(msg.Message)
+	}
+	if text == "" {
+		return
+	}
+	if len([]rune(text)) > 200 {
+		text = string([]rune(text)[:200])
+	}
+
+	cleanText := FilterProfanity(text)
+	room := s.Hub.RoomOf(player.ID)
+	if room == "" {
+		room = player.Room
+	}
+
+	payload := map[string]any{
+		"type":      "player_chat",
+		"playerId":  player.ID,
+		"name":      player.Name,
+		"text":      cleanText,
+		"room":      room,
+		"timestamp": time.Now().UnixMilli(),
+	}
+
+	s.Hub.BroadcastAll(payload)
 }

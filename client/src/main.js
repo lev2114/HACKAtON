@@ -362,6 +362,120 @@ function makeNameTag(name) {
   return sprite;
 }
 
+
+// Облачко сообщения над головой игрока (THREE.Sprite billboard)
+function createSpeechBubbleSprite(text) {
+  const canvas = document.createElement("canvas");
+  canvas.width = 512;
+  canvas.height = 256;
+  const ctx = canvas.getContext("2d");
+
+  const fontSize = 24;
+  const lineHeight = 32;
+  ctx.font = "bold " + fontSize + "px system-ui, -apple-system, sans-serif";
+
+  const maxWidth = 450;
+  const words = text.split(" ");
+  const lines = [];
+  let cur = "";
+
+  for (const w of words) {
+    const test = cur ? cur + " " + w : w;
+    if (ctx.measureText(test).width > maxWidth && cur) {
+      lines.push(cur);
+      cur = w;
+      if (lines.length >= 3) break;
+    } else {
+      cur = test;
+    }
+  }
+  if (cur && lines.length < 3) lines.push(cur);
+  if (lines.length === 3 && words.length > lines.join(" ").split(" ").length) {
+    lines[2] += "…";
+  }
+
+  let maxW = 0;
+  for (const l of lines) {
+    const w = ctx.measureText(l).width;
+    if (w > maxW) maxW = w;
+  }
+  const bubbleW = Math.max(160, Math.min(480, maxW + 44));
+  const bubbleH = 30 + lines.length * lineHeight;
+  const x = (512 - bubbleW) / 2;
+  const y = 190 - bubbleH;
+  const radius = 14;
+
+  ctx.save();
+  ctx.shadowColor = "rgba(0, 0, 0, 0.65)";
+  ctx.shadowBlur = 14;
+  ctx.shadowOffsetY = 4;
+
+  ctx.beginPath();
+  ctx.moveTo(x + radius, y);
+  ctx.lineTo(x + bubbleW - radius, y);
+  ctx.quadraticCurveTo(x + bubbleW, y, x + bubbleW, y + radius);
+  ctx.lineTo(x + bubbleW, y + bubbleH - radius);
+  ctx.quadraticCurveTo(x + bubbleW, y + bubbleH, x + bubbleW - radius, y + bubbleH);
+  // Стрелочка вниз по центру, указывает на шлем
+  ctx.lineTo(256 + 12, y + bubbleH);
+  ctx.lineTo(256, y + bubbleH + 16);
+  ctx.lineTo(256 - 12, y + bubbleH);
+  ctx.lineTo(x + radius, y + bubbleH);
+  ctx.quadraticCurveTo(x, y + bubbleH, x, y + bubbleH - radius);
+  ctx.lineTo(x, y + radius);
+  ctx.quadraticCurveTo(x, y, x + radius, y);
+  ctx.closePath();
+
+  ctx.fillStyle = "rgba(12, 16, 32, 0.94)";
+  ctx.fill();
+
+  ctx.strokeStyle = "#4fd8ff";
+  ctx.lineWidth = 3;
+  ctx.stroke();
+  ctx.restore();
+
+  ctx.font = "bold " + fontSize + "px system-ui, -apple-system, sans-serif";
+  ctx.fillStyle = "#ffffff";
+  ctx.textAlign = "center";
+  ctx.textBaseline = "middle";
+
+  const startY = y + 16 + lineHeight / 2;
+  for (let i = 0; i < lines.length; i++) {
+    ctx.fillText(lines[i], 256, startY + i * lineHeight);
+  }
+
+  const texture = new THREE.CanvasTexture(canvas);
+  const sprite = new THREE.Sprite(new THREE.SpriteMaterial({ map: texture, depthTest: false, transparent: true }));
+  const worldW = (bubbleW / 512) * 2.8;
+  const worldH = ((bubbleH + 18) / 256) * 1.4;
+  sprite.scale.set(worldW, worldH, 1);
+  sprite.position.y = 0.85 + worldH / 2;
+  sprite.renderOrder = 10;
+  return sprite;
+}
+
+function showPlayerSpeechBubble(mesh, text) {
+  if (!mesh) return;
+  if (mesh.userData.speechSprite) {
+    mesh.remove(mesh.userData.speechSprite);
+    if (mesh.userData.speechSprite.material?.map) mesh.userData.speechSprite.material.map.dispose();
+    mesh.userData.speechSprite.material?.dispose();
+    clearTimeout(mesh.userData.speechTimer);
+    mesh.userData.speechSprite = null;
+  }
+  const sprite = createSpeechBubbleSprite(text);
+  mesh.add(sprite);
+  mesh.userData.speechSprite = sprite;
+  mesh.userData.speechTimer = setTimeout(() => {
+    if (mesh.userData.speechSprite === sprite) {
+      mesh.remove(sprite);
+      if (sprite.material?.map) sprite.material.map.dispose();
+      sprite.material?.dispose();
+      mesh.userData.speechSprite = null;
+    }
+  }, 6500);
+}
+
 function spawnPlayerMesh(id, name, x, y, z) {
   const existing = players.get(id);
   if (existing) {
@@ -502,6 +616,15 @@ net.on("player_left", (msg) => {
   updateHud();
 });
 
+net.on("player_chat", (msg) => {
+  const isMe = msg.playerId === myId;
+  addPlayerChatMessage(msg.name, msg.text, isMe, msg.room);
+  if (!isMe) {
+    const mesh = players.get(msg.playerId);
+    if (mesh) showPlayerSpeechBubble(mesh, msg.text);
+  }
+});
+
 net.on("disconnect", () => {
   disconnected = true;
   for (const id of [...players.keys()]) removePlayerMesh(id);
@@ -521,6 +644,8 @@ net.on("error", (msg) => {
   if (msg.code === "npc_out_of_reach") {
     if (msg.requestId !== undefined && msg.requestId !== chatRequestId) return;
     if (chatOpen) closeChat(false);
+  if (playerChatOpen) closePlayerChat();
+  if (playerChatLog) playerChatLog.innerHTML = "";
     console.warn(msg.message);
     return;
   }
@@ -537,6 +662,70 @@ net.on("error", (msg) => {
     chatWaiting = false;
   }
 });
+
+// ── Чат между игроками (Enter) ──
+const playerChatLog = document.getElementById("player-chat-log");
+const playerChatBarWrap = document.getElementById("player-chat-bar-wrap");
+const playerChatInput = document.getElementById("player-chat-input");
+const playerChatSend = document.getElementById("player-chat-send");
+let playerChatOpen = false;
+
+function addPlayerChatMessage(name, text, isMe, room) {
+  if (!playerChatLog) return;
+  const entry = document.createElement("div");
+  entry.className = isMe ? "chat-log-msg me" : "chat-log-msg";
+
+  const author = document.createElement("span");
+  author.className = "author";
+  author.textContent = (isMe ? "Вы" : (name || "Космонавт")) + ":";
+  entry.appendChild(author);
+
+  const body = document.createElement("span");
+  body.className = "text";
+  body.textContent = text;
+  entry.appendChild(body);
+
+  playerChatLog.prepend(entry);
+
+  while (playerChatLog.children.length > 10) {
+    playerChatLog.removeChild(playerChatLog.lastChild);
+  }
+
+  setTimeout(() => {
+    entry.style.opacity = "0.35";
+  }, 10000);
+}
+
+function openPlayerChat() {
+  if (!playerChatBarWrap || !playerChatInput) return;
+  playerChatOpen = true;
+  playerChatBarWrap.style.display = "block";
+  playerChatInput.value = "";
+  playerChatInput.focus();
+  if (document.pointerLockElement) document.exitPointerLock();
+  clearMovementKeys();
+}
+
+function closePlayerChat() {
+  if (!playerChatBarWrap || !playerChatInput) return;
+  playerChatOpen = false;
+  playerChatBarWrap.style.display = "none";
+  playerChatInput.blur();
+  clearMovementKeys();
+}
+
+function sendPlayerChatMessage() {
+  if (!playerChatInput) return;
+  const text = playerChatInput.value.trim();
+  if (text.length > 0) {
+    net.send("chat", { text });
+  }
+  closePlayerChat();
+}
+
+if (playerChatSend) {
+  playerChatSend.addEventListener("click", () => sendPlayerChatMessage());
+}
 
 // --- движение: WASD + мышь (pointer lock) + прыжок (Space) ---
 const JUMP_SPEED = 5.2; // м/с начальная скорость прыжка
@@ -570,7 +759,7 @@ window.addEventListener("blur", clearMovementKeys);
 document.addEventListener("visibilitychange", () => { if (document.hidden) clearMovementKeys(); });
 
 renderer.domElement.addEventListener("click", () => {
-  if (!chatOpen && running && !paused) renderer.domElement.requestPointerLock();
+  if (!chatOpen && !playerChatOpen && running && !paused) renderer.domElement.requestPointerLock();
 });
 
 let yaw = 0;
@@ -817,7 +1006,7 @@ function tick() {
     lastConversationHeartbeat = performance.now();
   }
 
-  if (!paused && !chatOpen) {
+  if (!paused && !chatOpen && !playerChatOpen) {
     camera.rotation.y = yaw;
     camera.rotation.x = pitch;
 
